@@ -31,11 +31,17 @@ pub struct SearchResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct NoteImage {
+    pub image_key: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 pub struct EditableItem {
     pub id: i64,
     pub title: String,
     pub note: String,
-    pub screenshot: Option<Vec<u8>>,
+    pub images: Vec<NoteImage>,
 }
 
 #[derive(Debug, Clone, Copy)]

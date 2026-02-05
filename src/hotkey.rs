@@ -3,10 +3,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use eframe::egui;
-use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
-    hotkey::HotKey,
-};
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
 
 use crate::models::AppMessage;
 
