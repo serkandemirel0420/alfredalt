@@ -10,7 +10,7 @@ struct AlfredAlternativeApp: App {
                 .environmentObject(viewModel)
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1100, height: 220)
+        .defaultSize(width: 1040, height: 220)
 
         Window("Editor", id: "editor") {
             EditorWindowView()

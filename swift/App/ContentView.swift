@@ -1,55 +1,59 @@
 import AppKit
 import SwiftUI
 
+private let launcherWindowWidth: CGFloat = 1040
 private let launcherEmptyHeight: CGFloat = 220
-private let launcherNoResultsHeight: CGFloat = 250
-private let launcherResultsBaseHeight: CGFloat = 190
 private let launcherResultRowHeight: CGFloat = 60
 private let launcherMaxVisibleRows: CGFloat = 5
-private let launcherMaxHeight: CGFloat = 500
+private let keyHandlingModifierMask: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
+
+private struct LauncherShellHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = launcherEmptyHeight
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
 
 struct ContentView: View {
     @EnvironmentObject private var viewModel: LauncherViewModel
     @Environment(\.openWindow) private var openWindow
     @FocusState private var searchFieldFocused: Bool
     @State private var selectedIndex = 0
-
-    private var desiredLauncherHeight: CGFloat {
-        if viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return launcherEmptyHeight
-        }
-
-        if viewModel.results.isEmpty {
-            return launcherNoResultsHeight
-        }
-
-        let visibleRows = min(CGFloat(viewModel.results.count), launcherMaxVisibleRows)
-        return min(
-            max(launcherResultsBaseHeight + visibleRows * launcherResultRowHeight, launcherNoResultsHeight),
-            launcherMaxHeight
-        )
-    }
+    @State private var measuredShellHeight: CGFloat = launcherEmptyHeight
 
     var body: some View {
-        GeometryReader { proxy in
-            let shellWidth = min(max(proxy.size.width - 48, 640), 1040)
-
-            VStack {
-                Spacer(minLength: 10)
-                launcherShell(width: shellWidth)
-                Spacer(minLength: 14)
+        launcherShell(width: launcherWindowWidth)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: LauncherShellHeightPreferenceKey.self,
+                        value: ceil(proxy.size.height)
+                    )
+                }
+            )
+            .frame(width: launcherWindowWidth)
+            .background(Color.clear)
+            .background(
+                WindowConfigurator(
+                    desiredSize: NSSize(width: launcherWindowWidth, height: measuredShellHeight)
+                ) { window in
+                    viewModel.registerLauncherWindow(window)
+                }
+            )
+            .background(
+                KeyEventMonitor { event in
+                    if viewModel.isEditorPresented {
+                        return false
+                    }
+                    return handleLauncherKeyEvent(event)
+                }
+            )
+            .onPreferenceChange(LauncherShellHeightPreferenceKey.self) { value in
+                if abs(measuredShellHeight - value) > 0.5 {
+                    measuredShellHeight = value
+                }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .padding(.horizontal, 0)
-            .background(Color(nsColor: NSColor(calibratedWhite: 0.94, alpha: 1.0)))
-        }
-        .background(Color(nsColor: NSColor(calibratedWhite: 0.94, alpha: 1.0)))
-        .background(WindowConfigurator(desiredHeight: desiredLauncherHeight))
-        .background(
-            KeyEventMonitor { event in
-                handleLauncherKeyEvent(event)
-            }
-        )
         .onAppear {
             searchFieldFocused = true
         }
@@ -59,6 +63,9 @@ struct ContentView: View {
             } else if selectedIndex >= viewModel.results.count {
                 selectedIndex = max(0, viewModel.results.count - 1)
             }
+        }
+        .onChange(of: viewModel.launcherFocusRequestID) { _, _ in
+            searchFieldFocused = true
         }
         .task {
             await viewModel.initialLoad()
@@ -78,7 +85,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(Color(red: 238 / 255, green: 238 / 255, blue: 238 / 255))
+            .background(Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255, opacity: 252 / 255))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .stroke(
@@ -165,14 +172,15 @@ struct ContentView: View {
         Task {
             let openedEditor = await viewModel.activate(selectedIndex: selectedIndex)
             if openedEditor {
+                viewModel.beginEditorPresentation()
                 openWindow(id: "editor")
             }
         }
     }
 
     private func handleLauncherKeyEvent(_ event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if !flags.isEmpty {
+        let modifiers = event.modifierFlags.intersection(keyHandlingModifierMask)
+        if !modifiers.isEmpty {
             return false
         }
 
@@ -218,6 +226,41 @@ struct EditorWindowView: View {
             }
         }
         .background(Color(nsColor: NSColor.windowBackgroundColor))
+        .background(
+            WindowAccessor { window in
+                viewModel.registerEditorWindow(window)
+            }
+        )
+        .onAppear {
+            viewModel.beginEditorPresentation()
+        }
+        .onDisappear {
+            viewModel.editorDidClose()
+        }
+    }
+}
+
+private struct WindowAccessor: NSViewRepresentable {
+    let onResolve: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+
+        DispatchQueue.main.async {
+            if let window = view.window {
+                onResolve(window)
+            }
+        }
+
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            if let window = nsView.window {
+                onResolve(window)
+            }
+        }
     }
 }
 
@@ -458,16 +501,16 @@ private struct EditorSheet: View {
     }
 
     private func handleEditorKeyEvent(_ event: NSEvent) -> Bool {
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let modifiers = event.modifierFlags.intersection(keyHandlingModifierMask)
 
-        if flags == [.command],
+        if modifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "v",
            viewModel.hasImageInClipboard() {
             Task { await viewModel.pasteImageFromClipboard(at: editorCursorCharIndex) }
             return true
         }
 
-        if flags.isEmpty, event.keyCode == 53 {
+        if modifiers.isEmpty, event.keyCode == 53 {
             Task {
                 await viewModel.flushAutosave()
                 dismiss()

@@ -29,10 +29,14 @@ final class LauncherViewModel: ObservableObject {
     @Published var editorText: String = ""
     @Published var errorMessage: String?
     @Published private(set) var isSearching: Bool = false
+    @Published private(set) var isEditorPresented: Bool = false
+    @Published private(set) var launcherFocusRequestID: UInt64 = 0
 
     private var pendingSearchTask: Task<Void, Never>?
     private var searchGeneration: UInt64 = 0
     private var autosaveTask: Task<Void, Never>?
+    private weak var launcherWindow: NSWindow?
+    private weak var editorWindow: NSWindow?
 
     func initialLoad() async {
         if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -45,6 +49,34 @@ final class LauncherViewModel: ObservableObject {
             return await open(itemId: results[selectedIndex].id)
         }
         return await createItemFromQuery()
+    }
+
+    func registerLauncherWindow(_ window: NSWindow) {
+        launcherWindow = window
+    }
+
+    func registerEditorWindow(_ window: NSWindow) {
+        editorWindow = window
+    }
+
+    func beginEditorPresentation() {
+        isEditorPresented = true
+        launcherWindow?.orderOut(nil)
+
+        NSApp.activate(ignoringOtherApps: true)
+        editorWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    func editorDidClose() {
+        guard isEditorPresented else {
+            return
+        }
+
+        isEditorPresented = false
+        NSApp.activate(ignoringOtherApps: true)
+        launcherWindow?.makeKeyAndOrderFront(nil)
+        launcherWindow?.orderFrontRegardless()
+        launcherFocusRequestID &+= 1
     }
 
     func open(itemId: Int64) async -> Bool {
