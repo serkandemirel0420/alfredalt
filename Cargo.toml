@@ -2,19 +2,17 @@
 name = "alfred_alt"
 version = "0.1.0"
 edition = "2024"
+default-run = "alfred_alt"
+
+[lib]
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
 anyhow = "1"
 directories = "5"
-eframe = { version = "0.27", default-features = false, features = ["glow", "default_fonts"] }
-egui = "0.27"
-global-hotkey = "0.5"
 once_cell = "1"
 rusqlite = { version = "0.31", features = ["bundled", "unlock_notify", "modern_sqlite"] }
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-arboard = "3"
-
-[patch.crates-io]
-egui-winit = { path = "vendor/egui-winit" }
+uniffi = "0.29"
+uniffi_bindgen = "0.29.5"

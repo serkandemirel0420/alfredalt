@@ -2,18 +2,29 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use directories::ProjectDirs;
 use once_cell::sync::{Lazy, OnceCell};
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, params};
+use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction};
+use serde::Serialize;
 
-use crate::hotkey::DEFAULT_HOTKEY;
 use crate::models::{EditableItem, Item, NoteImage, SearchResult};
 
 static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
-pub const MAX_SCREENSHOT_BYTES: usize = 1_500_000;
+pub const MAX_SCREENSHOT_BYTES: usize = 12_000_000;
 pub const MAX_NOTE_IMAGE_COUNT: usize = 24;
+pub const DEFAULT_HOTKEY: &str = "super+Space";
 const CURRENT_SCHEMA_VERSION: i64 = 4;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExportItem {
+    pub id: i64,
+    pub title: String,
+    pub subtitle: String,
+    pub keywords: String,
+    pub note: String,
+    pub image_count: i64,
+}
 
 static SAMPLE_DATA: Lazy<Vec<Item>> = Lazy::new(|| {
     vec![
@@ -479,6 +490,40 @@ pub fn fetch_item(id: i64) -> Result<EditableItem> {
             images,
         };
         Ok(item)
+    })
+}
+
+pub fn export_items_snapshot() -> Result<Vec<ExportItem>> {
+    run_with_recovery(|conn| {
+        let mut stmt = conn.prepare_cached(
+            r#"
+            SELECT
+                items.id,
+                items.title,
+                items.subtitle,
+                items.keywords,
+                COALESCE(items.note, ''),
+                COUNT(item_images.id) as image_count
+            FROM items
+            LEFT JOIN item_images ON item_images.item_id = items.id
+            GROUP BY items.id
+            ORDER BY items.title COLLATE NOCASE ASC, items.id ASC
+            "#,
+        )?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ExportItem {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    subtitle: row.get(2)?,
+                    keywords: row.get(3)?,
+                    note: row.get(4)?,
+                    image_count: row.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     })
 }
 

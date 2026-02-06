@@ -3,7 +3,6 @@ pub struct Item {
     pub title: String,
     pub subtitle: String,
     pub keywords: String,
-    pub note: String,
 }
 
 impl Item {
@@ -16,7 +15,6 @@ impl Item {
             title: title.into(),
             subtitle: subtitle.into(),
             keywords: keywords.into(),
-            note: String::new(),
         }
     }
 }
@@ -42,9 +40,4 @@ pub struct EditableItem {
     pub title: String,
     pub note: String,
     pub images: Vec<NoteImage>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum AppMessage {
-    ToggleLauncher,
 }
