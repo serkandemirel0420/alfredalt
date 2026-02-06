@@ -4,6 +4,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{
     collections::HashMap,
+    collections::HashSet,
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
 };
@@ -12,7 +13,7 @@ use arboard::Clipboard;
 use eframe::{App, egui};
 use egui::{Color32, Key, TextEdit, text::LayoutJob, text::TextFormat};
 use image::{
-    ColorType, GenericImageView, ImageBuffer, ImageEncoder, ImageFormat, Rgba,
+    ColorType, ImageBuffer, ImageEncoder, Rgba, RgbaImage,
     codecs::png::{CompressionType, FilterType, PngEncoder},
     imageops::FilterType as ResizeFilterType,
 };
@@ -39,13 +40,26 @@ const SCREENSHOT_MAX_PIXELS: u64 = 8_294_400; // 3840x2160
 const SCREENSHOT_MAX_INPUT_BYTES: usize = 20 * 1024 * 1024;
 const NOTE_IMAGE_URL_PREFIX: &str = "alfred://image/";
 const SCREENSHOT_MARKDOWN_REF: &str = "![image](alfred://image/main)";
-const INLINE_IMAGE_MAX_HEIGHT: f32 = 180.0;
-const INLINE_IMAGE_ROW_HEIGHT: f32 = INLINE_IMAGE_MAX_HEIGHT + 12.0;
 const INLINE_IMAGE_PADDING_X: f32 = 6.0;
 const INLINE_IMAGE_PADDING_Y: f32 = 6.0;
+const INLINE_IMAGE_DEFAULT_WIDTH: f32 = 360.0;
+const INLINE_IMAGE_MIN_WIDTH: f32 = 140.0;
+const INLINE_IMAGE_MAX_WIDTH: f32 = 1200.0;
+const INLINE_IMAGE_RESIZE_STEP: f32 = 80.0;
+const INLINE_IMAGE_MAX_HEIGHT: f32 = 120.0;
+const INLINE_IMAGE_ROW_HEIGHT: f32 = INLINE_IMAGE_MAX_HEIGHT + INLINE_IMAGE_PADDING_Y * 2.0;
 
-fn markdown_image_ref(key: &str) -> String {
-    format!("![image]({}{key})", NOTE_IMAGE_URL_PREFIX)
+fn markdown_image_ref(key: &str, width: Option<f32>) -> String {
+    let width_suffix = width
+        .and_then(|value| {
+            if !value.is_finite() {
+                return None;
+            }
+            let normalized = value.clamp(INLINE_IMAGE_MIN_WIDTH, INLINE_IMAGE_MAX_WIDTH);
+            Some(format!("?w={}", normalized.round() as i32))
+        })
+        .unwrap_or_default();
+    format!("![image]({}{key}{width_suffix})", NOTE_IMAGE_URL_PREFIX)
 }
 
 #[derive(Clone, Copy)]
@@ -72,24 +86,35 @@ struct DecodedImage {
 }
 
 #[derive(Clone)]
+struct ParsedImageRef {
+    key: String,
+    width: Option<f32>,
+}
+
+#[derive(Clone)]
 struct InlineImageMarker {
     key: String,
     start_char: usize,
+    end_char: usize,
     start_byte: usize,
     end_byte: usize,
+    requested_width: Option<f32>,
 }
 
 #[derive(Default, Clone, Copy)]
 struct EditorActions {
     remove_image: bool,
+    shrink_image: bool,
+    grow_image: bool,
 }
 
 enum EditorTask {
     SaveItem {
         item_id: i64,
         content_hash: u64,
+        images_hash: u64,
         note: String,
-        images: Vec<NoteImage>,
+        images: Option<Vec<NoteImage>>,
     },
 }
 
@@ -97,6 +122,8 @@ enum EditorTaskResult {
     ItemSaved {
         item_id: i64,
         content_hash: u64,
+        images_hash: u64,
+        wrote_images: bool,
         result: Result<(), String>,
     },
 }
@@ -117,6 +144,8 @@ pub struct LauncherApp {
     editor_dirty: bool,
     last_editor_edit: Option<Instant>,
     last_saved_editor_hash: Option<u64>,
+    editor_images_hash: u64,
+    editor_images_dirty: bool,
     save_in_flight: Option<(i64, u64)>,
     selected_image_key: Option<String>,
     editor_cursor_char_index: Option<usize>,
@@ -159,6 +188,8 @@ impl LauncherApp {
             editor_dirty: false,
             last_editor_edit: None,
             last_saved_editor_hash: None,
+            editor_images_hash: 0,
+            editor_images_dirty: false,
             save_in_flight: None,
             selected_image_key: None,
             editor_cursor_char_index: None,
@@ -193,14 +224,18 @@ impl LauncherApp {
                     EditorTask::SaveItem {
                         item_id,
                         content_hash,
+                        images_hash,
                         note,
                         images,
                     } => {
-                        let result = update_item(item_id, &note, &images)
+                        let wrote_images = images.is_some();
+                        let result = update_item(item_id, &note, images.as_deref())
                             .map_err(|err| format!("Failed to save item: {err}"));
                         EditorTaskResult::ItemSaved {
                             item_id,
                             content_hash,
+                            images_hash,
+                            wrote_images,
                             result,
                         }
                     }
@@ -410,7 +445,8 @@ impl LauncherApp {
     fn open_editor(&mut self, item_id: i64, ctx: &egui::Context) {
         match fetch_item(item_id) {
             Ok(item) => {
-                let initial_hash = Self::editor_content_hash(&item);
+                let images_hash = Self::images_hash(&item.images);
+                let initial_hash = Self::editor_content_hash(&item.note, images_hash);
                 let selected_image_key = item.images.first().map(|img| img.image_key.clone());
                 self.editor_item = Some(item);
                 self.editor_open = true;
@@ -422,6 +458,8 @@ impl LauncherApp {
                 self.editor_dirty = false;
                 self.last_editor_edit = None;
                 self.last_saved_editor_hash = Some(initial_hash);
+                self.editor_images_hash = images_hash;
+                self.editor_images_dirty = false;
                 self.save_in_flight = None;
                 self.selected_image_key = selected_image_key;
                 self.editor_cursor_char_index = None;
@@ -438,25 +476,29 @@ impl LauncherApp {
     }
 
     fn queue_editor_save(&mut self) -> bool {
-        let Some(item) = self.editor_item.as_ref() else {
-            return false;
-        };
-
         if self.save_in_flight.is_some() {
             return false;
         }
 
-        let current_hash = Self::editor_content_hash(item);
+        let Some(item) = self.editor_item.as_ref() else {
+            return false;
+        };
+
+        let images_hash = self.editor_images_hash;
+        let current_hash = Self::editor_content_hash(&item.note, images_hash);
         if self.last_saved_editor_hash == Some(current_hash) {
-            self.editor_dirty = self.last_saved_editor_hash != Some(current_hash);
+            self.editor_dirty = false;
+            self.last_editor_edit = None;
+            self.editor_images_dirty = false;
             return false;
         }
 
         let task = EditorTask::SaveItem {
             item_id: item.id,
             content_hash: current_hash,
+            images_hash,
             note: item.note.clone(),
-            images: item.images.clone(),
+            images: self.editor_images_dirty.then(|| item.images.clone()),
         };
         if let Err(err) = self.editor_task_tx.send(task) {
             self.last_error = Some(format!("Failed to queue save: {err}"));
@@ -489,15 +531,7 @@ impl LauncherApp {
                     }
                 };
 
-                let dyn_image = image::DynamicImage::ImageRgba8(rgba);
-                let mut png_bytes = Vec::new();
-                let mut cursor = std::io::Cursor::new(&mut png_bytes);
-                if let Err(err) = dyn_image.write_to(&mut cursor, ImageFormat::Png) {
-                    self.last_error = Some(format!("Could not encode pasted image: {err}"));
-                    return;
-                }
-
-                match normalize_screenshot_for_storage(&png_bytes) {
+                match normalize_rgba_for_storage(rgba) {
                     Ok(stored_bytes) => {
                         self.add_image_to_editor(
                             stored_bytes,
@@ -553,6 +587,8 @@ impl LauncherApp {
         self.editor_dirty = false;
         self.last_editor_edit = None;
         self.last_saved_editor_hash = None;
+        self.editor_images_hash = 0;
+        self.editor_images_dirty = false;
         self.save_in_flight = None;
         self.selected_image_key = None;
         self.editor_cursor_char_index = None;
@@ -578,6 +614,10 @@ impl LauncherApp {
     fn mark_screenshot_changed(&mut self) {
         self.inline_image_textures.clear();
         self.inline_image_texture_viewport = None;
+        if let Some(item) = self.editor_item.as_ref() {
+            self.editor_images_hash = Self::images_hash(&item.images);
+        }
+        self.editor_images_dirty = true;
         self.mark_editor_dirty();
     }
 
@@ -596,12 +636,29 @@ impl LauncherApp {
         }
     }
 
+    fn resize_selected_image(&mut self, delta: f32) {
+        if delta.abs() <= f32::EPSILON {
+            return;
+        }
+
+        let Some(selected) = self.selected_image_key.clone() else {
+            return;
+        };
+        if let Some(item) = self.editor_item.as_mut() {
+            if Self::update_markdown_image_ref_width(&mut item.note, &selected, delta) {
+                self.mark_screenshot_changed();
+            }
+        }
+    }
+
     fn apply_editor_task_results(&mut self) {
         loop {
             match self.editor_task_rx.try_recv() {
                 Ok(EditorTaskResult::ItemSaved {
                     item_id,
                     content_hash,
+                    images_hash,
+                    wrote_images,
                     result,
                 }) => {
                     if self.save_in_flight == Some((item_id, content_hash)) {
@@ -618,8 +675,15 @@ impl LauncherApp {
                         Ok(()) => {
                             if active_item_matches {
                                 self.last_saved_editor_hash = Some(content_hash);
+                                if wrote_images && self.editor_images_hash == images_hash {
+                                    self.editor_images_dirty = false;
+                                }
                                 if let Some(item) = self.editor_item.as_ref() {
-                                    if Self::editor_content_hash(item) == content_hash {
+                                    if Self::editor_content_hash(
+                                        &item.note,
+                                        self.editor_images_hash,
+                                    ) == content_hash
+                                    {
                                         self.editor_dirty = false;
                                         self.last_editor_edit = None;
                                     }
@@ -639,11 +703,17 @@ impl LauncherApp {
         }
     }
 
-    fn editor_content_hash(item: &EditableItem) -> u64 {
+    fn editor_content_hash(note: &str, images_hash: u64) -> u64 {
         let mut hasher = DefaultHasher::new();
-        item.note.hash(&mut hasher);
-        item.images.len().hash(&mut hasher);
-        for image in &item.images {
+        note.hash(&mut hasher);
+        images_hash.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn images_hash(images: &[NoteImage]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        images.len().hash(&mut hasher);
+        for image in images {
             image.image_key.hash(&mut hasher);
             image.bytes.hash(&mut hasher);
         }
@@ -676,14 +746,35 @@ impl LauncherApp {
         }
     }
 
-    fn image_key_from_markdown_line(line: &str) -> Option<&str> {
+    fn parse_markdown_image_line(line: &str) -> Option<ParsedImageRef> {
         let marker_prefix = "![image](";
         if !line.starts_with(marker_prefix) || !line.ends_with(')') {
             return None;
         }
 
         let url = &line[marker_prefix.len()..line.len() - 1];
-        url.strip_prefix(NOTE_IMAGE_URL_PREFIX)
+        let url = url.strip_prefix(NOTE_IMAGE_URL_PREFIX)?;
+
+        let (key, width) = if let Some((key, width)) = url.split_once("?w=") {
+            let parsed = width
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(|value| value.clamp(INLINE_IMAGE_MIN_WIDTH, INLINE_IMAGE_MAX_WIDTH));
+            (key, parsed)
+        } else {
+            (url, None)
+        };
+
+        if key.is_empty() {
+            return None;
+        }
+
+        Some(ParsedImageRef {
+            key: key.to_string(),
+            width,
+        })
     }
 
     fn inline_image_markers(note: &str) -> Vec<InlineImageMarker> {
@@ -699,12 +790,15 @@ impl LauncherApp {
                 line_with_break
             };
 
-            if let Some(key) = Self::image_key_from_markdown_line(line) {
+            if let Some(parsed) = Self::parse_markdown_image_line(line) {
+                let line_char_count = line.chars().count();
                 markers.push(InlineImageMarker {
-                    key: key.to_string(),
+                    key: parsed.key,
                     start_char: char_offset,
+                    end_char: char_offset + line_char_count,
                     start_byte: byte_offset,
                     end_byte: byte_offset + line.len(),
+                    requested_width: parsed.width,
                 });
             }
 
@@ -716,6 +810,89 @@ impl LauncherApp {
         }
 
         markers
+    }
+
+    fn image_marker_key_at_char(note: &str, char_index: usize) -> Option<String> {
+        Self::inline_image_markers(note)
+            .into_iter()
+            .find(|marker| marker.start_char <= char_index && char_index <= marker.end_char)
+            .map(|marker| marker.key)
+    }
+
+    fn reconcile_note_image_references(
+        item: &mut EditableItem,
+        selected_image_key: &mut Option<String>,
+    ) -> bool {
+        let original_note = item.note.clone();
+        let mut rebuilt_note = String::with_capacity(original_note.len());
+        let mut referenced_keys = HashSet::new();
+
+        for line_with_break in original_note.split_inclusive('\n') {
+            let has_newline = line_with_break.ends_with('\n');
+            let line = if has_newline {
+                &line_with_break[..line_with_break.len() - 1]
+            } else {
+                line_with_break
+            };
+
+            if let Some(parsed) = Self::parse_markdown_image_line(line) {
+                referenced_keys.insert(parsed.key);
+                rebuilt_note.push_str(line);
+                if has_newline {
+                    rebuilt_note.push('\n');
+                }
+                continue;
+            }
+
+            let trimmed = line.trim();
+            if trimmed.starts_with("![image](")
+                || trimmed.contains(NOTE_IMAGE_URL_PREFIX)
+                || trimmed.contains("://image/")
+            {
+                // If a marker was partially deleted, strip the whole broken line so no raw path text remains.
+                continue;
+            }
+
+            rebuilt_note.push_str(line);
+            if has_newline {
+                rebuilt_note.push('\n');
+            }
+        }
+
+        let note_changed = rebuilt_note != original_note;
+        if note_changed {
+            item.note = rebuilt_note;
+        }
+
+        let fallback_main_key = if referenced_keys.contains("main")
+            && !item.images.iter().any(|img| img.image_key == "main")
+        {
+            item.images.first().map(|img| img.image_key.clone())
+        } else {
+            None
+        };
+
+        let before_images = item.images.len();
+        item.images.retain(|img| {
+            referenced_keys.contains(&img.image_key)
+                || fallback_main_key.as_deref() == Some(img.image_key.as_str())
+        });
+        let images_changed = item.images.len() != before_images;
+
+        let selected_is_valid = selected_image_key
+            .as_ref()
+            .map(|selected| item.images.iter().any(|img| &img.image_key == selected))
+            .unwrap_or(false);
+        let mut selection_changed = false;
+        if !selected_is_valid {
+            let replacement = item.images.first().map(|img| img.image_key.clone());
+            if *selected_image_key != replacement {
+                *selected_image_key = replacement;
+                selection_changed = true;
+            }
+        }
+
+        note_changed || images_changed || selection_changed
     }
 
     fn layout_editor_note(
@@ -840,9 +1017,14 @@ impl LauncherApp {
                 continue;
             }
 
-            let max_width =
-                (output.text_clip_rect.width() - INLINE_IMAGE_PADDING_X * 2.0).max(32.0);
-            let scale = (max_width / tex_size.x)
+            let max_width = (output.text_clip_rect.width() - INLINE_IMAGE_PADDING_X * 2.0)
+                .max(INLINE_IMAGE_MIN_WIDTH);
+            let requested_width = marker
+                .requested_width
+                .unwrap_or(INLINE_IMAGE_DEFAULT_WIDTH)
+                .clamp(INLINE_IMAGE_MIN_WIDTH, INLINE_IMAGE_MAX_WIDTH);
+            let target_width = requested_width.min(max_width).min(tex_size.x);
+            let scale = (target_width / tex_size.x)
                 .min(INLINE_IMAGE_MAX_HEIGHT / tex_size.y)
                 .min(1.0);
             let draw_size = tex_size * scale;
@@ -852,12 +1034,27 @@ impl LauncherApp {
                 output.galley_pos.y + row_rect.top() + INLINE_IMAGE_PADDING_Y,
             );
             let image_rect = egui::Rect::from_min_size(top_left, draw_size);
+            let image_id =
+                ui.make_persistent_id(("inline-image", marker.key.as_str(), marker.start_byte));
+            let image_response = ui.interact(image_rect, image_id, egui::Sense::click());
+            if image_response.clicked() {
+                self.selected_image_key = Some(marker.key.clone());
+            }
+
             painter.image(
                 texture.id(),
                 image_rect,
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
+
+            if self.selected_image_key.as_deref() == Some(marker.key.as_str()) {
+                painter.rect_stroke(
+                    image_rect.expand(1.5),
+                    3.0,
+                    egui::Stroke::new(1.5, Color32::from_rgb(80, 145, 214)),
+                );
+            }
         }
     }
 
@@ -921,6 +1118,7 @@ impl LauncherApp {
 
     fn render_editor_contents(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> EditorActions {
         let mut note_changed = false;
+        let mut image_state_changed = false;
         let mut actions = EditorActions::default();
         let is_dirty = self.editor_dirty;
         let mut inline_output: Option<egui::text_edit::TextEditOutput> = None;
@@ -940,12 +1138,32 @@ impl LauncherApp {
             ui.add_space(4.0);
 
             ui.horizontal_wrapped(|ui| {
-                if !item.images.is_empty() && ui.button("Remove Image").clicked() {
-                    actions.remove_image = true;
+                if !item.images.is_empty() {
+                    if ui.button("Remove Image").clicked() {
+                        actions.remove_image = true;
+                    }
+
+                    let can_resize = self
+                        .selected_image_key
+                        .as_ref()
+                        .map(|selected| item.images.iter().any(|img| &img.image_key == selected))
+                        .unwrap_or(false);
+                    if ui
+                        .add_enabled(can_resize, egui::Button::new("Image -"))
+                        .clicked()
+                    {
+                        actions.shrink_image = true;
+                    }
+                    if ui
+                        .add_enabled(can_resize, egui::Button::new("Image +"))
+                        .clicked()
+                    {
+                        actions.grow_image = true;
+                    }
                 }
                 ui.label(
                     egui::RichText::new(
-                        "Paste images with Cmd/Ctrl+V; they appear inline where you paste.",
+                        "Paste with Cmd/Ctrl+V. Click an image to select, then use Image +/- to resize.",
                     )
                     .size(11.0)
                     .color(egui::Color32::from_gray(90)),
@@ -979,13 +1197,28 @@ impl LauncherApp {
 
                 if output.response.changed() {
                     note_changed = true;
+                    if Self::reconcile_note_image_references(item, &mut self.selected_image_key) {
+                        image_state_changed = true;
+                    }
                 }
 
                 if let Some(range) = output.state.cursor.char_range() {
                     let pos = range.primary.index.min(item.note.chars().count());
                     self.editor_cursor_char_index = Some(pos);
+                    if let Some(key) = Self::image_marker_key_at_char(&item.note, pos) {
+                        self.selected_image_key = Some(key);
+                    }
                 } else {
                     self.editor_cursor_char_index = Some(item.note.chars().count());
+                }
+
+                if !self
+                    .selected_image_key
+                    .as_ref()
+                    .map(|selected| item.images.iter().any(|img| &img.image_key == selected))
+                    .unwrap_or(false)
+                {
+                    self.selected_image_key = item.images.first().map(|img| img.image_key.clone());
                 }
 
                 note_for_inline = Some(item.note.clone());
@@ -1000,6 +1233,10 @@ impl LauncherApp {
 
         if note_changed {
             self.mark_editor_dirty();
+        }
+        if image_state_changed {
+            self.inline_image_textures.clear();
+            self.inline_image_texture_viewport = None;
         }
 
         if let (Some(output), Some(note)) = (inline_output.as_ref(), note_for_inline.as_deref()) {
@@ -1019,6 +1256,7 @@ impl LauncherApp {
         let mut close_now = false;
         let mut paste_now = false;
         let mut remove_image_now = false;
+        let mut resize_image_delta = 0.0f32;
         let viewport_id = Self::editor_viewport_id();
         let builder = egui::ViewportBuilder::default()
             .with_title("Markdown Editor")
@@ -1055,6 +1293,12 @@ impl LauncherApp {
                         .show(editor_ctx, |ui| {
                             let actions = self.render_editor_contents(editor_ctx, ui);
                             remove_image_now |= actions.remove_image;
+                            if actions.shrink_image {
+                                resize_image_delta -= INLINE_IMAGE_RESIZE_STEP;
+                            }
+                            if actions.grow_image {
+                                resize_image_delta += INLINE_IMAGE_RESIZE_STEP;
+                            }
                         });
                 }
                 egui::ViewportClass::Root
@@ -1063,6 +1307,12 @@ impl LauncherApp {
                     egui::CentralPanel::default().show(editor_ctx, |ui| {
                         let actions = self.render_editor_contents(editor_ctx, ui);
                         remove_image_now |= actions.remove_image;
+                        if actions.shrink_image {
+                            resize_image_delta -= INLINE_IMAGE_RESIZE_STEP;
+                        }
+                        if actions.grow_image {
+                            resize_image_delta += INLINE_IMAGE_RESIZE_STEP;
+                        }
                     });
                 }
             }
@@ -1086,6 +1336,11 @@ impl LauncherApp {
             if remove_image_now {
                 self.remove_selected_image();
                 remove_image_now = false;
+            }
+
+            if resize_image_delta.abs() > f32::EPSILON {
+                self.resize_selected_image(resize_image_delta);
+                resize_image_delta = 0.0;
             }
         });
 
@@ -1222,7 +1477,7 @@ impl LauncherApp {
     }
 
     fn insert_markdown_image_ref(note: &mut String, key: &str, cursor_char_index: Option<usize>) {
-        let marker = markdown_image_ref(key);
+        let marker = markdown_image_ref(key, Some(INLINE_IMAGE_DEFAULT_WIDTH));
         let total_chars = note.chars().count();
         let insert_chars = cursor_char_index.unwrap_or(total_chars).min(total_chars);
         let byte_index = note
@@ -1246,20 +1501,79 @@ impl LauncherApp {
         note.insert_str(byte_index, &snippet);
     }
 
-    fn remove_markdown_image_ref(note: &mut String, key: &str) {
-        let marker = markdown_image_ref(key);
-        *note = note
-            .replace(&format!("\n\n{marker}\n"), "\n\n")
-            .replace(&format!("\n{marker}\n"), "\n")
-            .replace(&format!("\n{marker}"), "\n")
-            .replace(&marker, "");
+    fn update_markdown_image_ref_width(note: &mut String, key: &str, delta: f32) -> bool {
+        if delta.abs() <= f32::EPSILON {
+            return false;
+        }
 
-        // Backward compatibility: also strip legacy main marker if present.
-        *note = note
-            .replace(&format!("\n\n{SCREENSHOT_MARKDOWN_REF}\n"), "\n\n")
-            .replace(&format!("\n{SCREENSHOT_MARKDOWN_REF}\n"), "\n")
-            .replace(&format!("\n{SCREENSHOT_MARKDOWN_REF}"), "\n")
-            .replace(SCREENSHOT_MARKDOWN_REF, "");
+        let mut changed = false;
+        let mut rebuilt = String::with_capacity(note.len());
+        for line_with_break in note.split_inclusive('\n') {
+            let has_newline = line_with_break.ends_with('\n');
+            let line = if has_newline {
+                &line_with_break[..line_with_break.len() - 1]
+            } else {
+                line_with_break
+            };
+
+            if let Some(parsed) = Self::parse_markdown_image_line(line) {
+                if parsed.key == key {
+                    let current_width = parsed.width.unwrap_or(INLINE_IMAGE_DEFAULT_WIDTH);
+                    let next_width = (current_width + delta)
+                        .clamp(INLINE_IMAGE_MIN_WIDTH, INLINE_IMAGE_MAX_WIDTH);
+                    let replacement = markdown_image_ref(&parsed.key, Some(next_width));
+                    changed |= replacement != line;
+                    rebuilt.push_str(&replacement);
+                    if has_newline {
+                        rebuilt.push('\n');
+                    }
+                    continue;
+                }
+            }
+
+            rebuilt.push_str(line);
+            if has_newline {
+                rebuilt.push('\n');
+            }
+        }
+
+        if changed {
+            *note = rebuilt;
+        }
+        changed
+    }
+
+    fn remove_markdown_image_ref(note: &mut String, key: &str) {
+        let mut rebuilt = String::with_capacity(note.len());
+        let mut changed = false;
+
+        for line_with_break in note.split_inclusive('\n') {
+            let has_newline = line_with_break.ends_with('\n');
+            let line = if has_newline {
+                &line_with_break[..line_with_break.len() - 1]
+            } else {
+                line_with_break
+            };
+
+            let remove = if let Some(parsed) = Self::parse_markdown_image_line(line) {
+                parsed.key == key || parsed.key == "main"
+            } else {
+                line == SCREENSHOT_MARKDOWN_REF
+            };
+            if remove {
+                changed = true;
+                continue;
+            }
+
+            rebuilt.push_str(line);
+            if has_newline {
+                rebuilt.push('\n');
+            }
+        }
+
+        if changed {
+            *note = rebuilt;
+        }
     }
 }
 
@@ -1556,6 +1870,67 @@ fn decode_screenshot_bytes(bytes: &[u8]) -> Result<DecodedImage, String> {
     })
 }
 
+fn encode_png_with_compression(
+    rgba: &RgbaImage,
+    compression: CompressionType,
+) -> Result<Vec<u8>, String> {
+    let mut encoded = Vec::new();
+    let encoder = PngEncoder::new_with_quality(&mut encoded, compression, FilterType::Adaptive);
+    encoder
+        .write_image(
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+            ColorType::Rgba8.into(),
+        )
+        .map_err(|err| format!("Could not encode screenshot: {err}"))?;
+    Ok(encoded)
+}
+
+fn encode_png_for_storage(rgba: &RgbaImage) -> Result<Vec<u8>, String> {
+    // Prioritize responsiveness: try fast compression first, then fall back to best
+    // only when needed to fit storage limits.
+    let fast = encode_png_with_compression(rgba, CompressionType::Fast)?;
+    if fast.len() <= MAX_SCREENSHOT_BYTES {
+        return Ok(fast);
+    }
+
+    let best = encode_png_with_compression(rgba, CompressionType::Best)?;
+    if best.len() <= MAX_SCREENSHOT_BYTES {
+        return Ok(best);
+    }
+
+    Err(format!(
+        "Screenshot is too large to store after compression ({} KB limit)",
+        MAX_SCREENSHOT_BYTES / 1024
+    ))
+}
+
+fn normalize_rgba_for_storage(rgba: RgbaImage) -> Result<Vec<u8>, String> {
+    let (width, height) = rgba.dimensions();
+    if width as u64 * height as u64 > SCREENSHOT_MAX_PIXELS {
+        return Err(format!(
+            "Screenshot resolution too large (max {} pixels)",
+            SCREENSHOT_MAX_PIXELS
+        ));
+    }
+
+    let processed =
+        if width > SCREENSHOT_MAX_DIMENSION_WIDTH || height > SCREENSHOT_MAX_DIMENSION_HEIGHT {
+            image::DynamicImage::ImageRgba8(rgba)
+                .resize(
+                    SCREENSHOT_MAX_DIMENSION_WIDTH,
+                    SCREENSHOT_MAX_DIMENSION_HEIGHT,
+                    ResizeFilterType::Triangle,
+                )
+                .to_rgba8()
+        } else {
+            rgba
+        };
+
+    encode_png_for_storage(&processed)
+}
+
 fn normalize_screenshot_for_storage(bytes: &[u8]) -> Result<Vec<u8>, String> {
     if bytes.len() > SCREENSHOT_MAX_INPUT_BYTES {
         return Err(format!(
@@ -1566,48 +1941,7 @@ fn normalize_screenshot_for_storage(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
     let img = image::load_from_memory(bytes)
         .map_err(|err| format!("Could not decode screenshot image: {err}"))?;
-    let (width, height) = img.dimensions();
-    if width as u64 * height as u64 > SCREENSHOT_MAX_PIXELS {
-        return Err(format!(
-            "Screenshot resolution too large (max {} pixels)",
-            SCREENSHOT_MAX_PIXELS
-        ));
-    }
-
-    let processed =
-        if width > SCREENSHOT_MAX_DIMENSION_WIDTH || height > SCREENSHOT_MAX_DIMENSION_HEIGHT {
-            img.resize(
-                SCREENSHOT_MAX_DIMENSION_WIDTH,
-                SCREENSHOT_MAX_DIMENSION_HEIGHT,
-                ResizeFilterType::Lanczos3,
-            )
-        } else {
-            img
-        };
-
-    let rgba = processed.to_rgba8();
-    let mut encoded = Vec::new();
-    {
-        let encoder =
-            PngEncoder::new_with_quality(&mut encoded, CompressionType::Best, FilterType::Adaptive);
-        encoder
-            .write_image(
-                rgba.as_raw(),
-                rgba.width(),
-                rgba.height(),
-                ColorType::Rgba8.into(),
-            )
-            .map_err(|err| format!("Could not encode screenshot: {err}"))?;
-    }
-
-    if encoded.len() > MAX_SCREENSHOT_BYTES {
-        return Err(format!(
-            "Screenshot is too large to store after compression ({} KB limit)",
-            MAX_SCREENSHOT_BYTES / 1024
-        ));
-    }
-
-    Ok(encoded)
+    normalize_rgba_for_storage(img.to_rgba8())
 }
 
 fn unix_time_secs() -> u64 {

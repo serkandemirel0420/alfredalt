@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -44,6 +45,11 @@ fn create_connection() -> Result<Connection> {
     )?;
     conn.pragma_update(None, "journal_mode", &"WAL")?;
     conn.pragma_update(None, "synchronous", &"NORMAL")?;
+    conn.pragma_update(None, "temp_store", &"MEMORY")?;
+    conn.pragma_update(None, "cache_size", &-12_000i32)?;
+    conn.pragma_update(None, "foreign_keys", &"ON")?;
+    conn.busy_timeout(std::time::Duration::from_millis(300))?;
+    conn.set_prepared_statement_cache_capacity(64);
     Ok(conn)
 }
 
@@ -357,23 +363,18 @@ pub fn save_hotkey_setting(value: &str) -> Result<()> {
 
 pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
     run_with_recovery(|conn| {
-        if query.trim().is_empty() {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, subtitle, note, keywords FROM items ORDER BY title LIMIT ?1",
-            )?;
+        let query = query.trim();
+        if query.is_empty() {
+            let mut stmt = conn
+                .prepare_cached("SELECT id, title, subtitle FROM items ORDER BY title LIMIT ?1")?;
             let rows = stmt
                 .query_map([limit], |row| {
-                    let note: String = row.get(3)?;
-                    let keywords: String = row.get(4)?;
-                    let title: String = row.get(1)?;
-                    let subtitle: String = row.get(2)?;
-                    let snippet_data = build_snippet(&title, &subtitle, &keywords, &note, query);
                     Ok(SearchResult {
                         id: row.get(0)?,
-                        title,
-                        subtitle,
-                        snippet: snippet_data.as_ref().map(|(_, text)| text.clone()),
-                        snippet_source: snippet_data.as_ref().map(|(source, _)| source.clone()),
+                        title: row.get(1)?,
+                        subtitle: row.get(2)?,
+                        snippet: None,
+                        snippet_source: None,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -381,10 +382,12 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
         }
 
         // First try FTS prefix match; then fallback to LIKE for substring hits.
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(limit.max(0) as usize);
+        let mut seen_ids = HashSet::with_capacity(limit.max(0) as usize);
+        let query_lower = query.to_lowercase();
 
-        {
-            let mut stmt = conn.prepare(
+        if let Some(fts_query) = build_fts_query(query) {
+            let mut stmt = conn.prepare_cached(
                 "SELECT items.id, items.title, items.subtitle, items.note, items.keywords
              FROM items_fts
              JOIN items ON items.id = items_fts.rowid
@@ -392,29 +395,21 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
              ORDER BY bm25(items_fts)
              LIMIT ?2",
             )?;
-            let q = format!("{}*", query); // prefix match
             let rows = stmt
-                .query_map(params![q, limit], |row| {
-                    let title: String = row.get(1)?;
-                    let subtitle: String = row.get(2)?;
-                    let note: String = row.get(3)?;
-                    let keywords: String = row.get(4)?;
-                    let snippet_data = build_snippet(&title, &subtitle, &keywords, &note, query);
-                    Ok(SearchResult {
-                        id: row.get(0)?,
-                        title,
-                        subtitle,
-                        snippet: snippet_data.as_ref().map(|(_, text)| text.clone()),
-                        snippet_source: snippet_data.as_ref().map(|(source, _)| source.clone()),
-                    })
+                .query_map(params![fts_query, limit], |row| {
+                    map_search_row(row, query, &query_lower)
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            results.extend(rows);
+            for row in rows {
+                if seen_ids.insert(row.id) {
+                    results.push(row);
+                }
+            }
         }
 
         if (results.len() as i64) < limit {
             let remaining = limit - results.len() as i64;
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 r#"SELECT id, title, subtitle, note, keywords FROM items
                WHERE title LIKE '%' || ?1 || '%'
                   OR subtitle LIKE '%' || ?1 || '%'
@@ -424,23 +419,11 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
             )?;
             let rows = stmt
                 .query_map(params![query, remaining], |row| {
-                    let title: String = row.get(1)?;
-                    let subtitle: String = row.get(2)?;
-                    let note: String = row.get(3)?;
-                    let keywords: String = row.get(4)?;
-                    let snippet_data = build_snippet(&title, &subtitle, &keywords, &note, query);
-                    Ok(SearchResult {
-                        id: row.get(0)?,
-                        title,
-                        subtitle,
-                        snippet: snippet_data.as_ref().map(|(_, text)| text.clone()),
-                        snippet_source: snippet_data.as_ref().map(|(source, _)| source.clone()),
-                    })
+                    map_search_row(row, query, &query_lower)
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            // Avoid duplicates by id
             for r in rows {
-                if !results.iter().any(|e| e.id == r.id) {
+                if seen_ids.insert(r.id) {
                     results.push(r);
                     if results.len() as i64 >= limit {
                         break;
@@ -465,7 +448,7 @@ pub fn insert_item(title: &str) -> Result<i64> {
 
 pub fn fetch_item(id: i64) -> Result<EditableItem> {
     run_with_recovery(|conn| {
-        let mut stmt = conn.prepare("SELECT id, title, note FROM items WHERE id = ?1")?;
+        let mut stmt = conn.prepare_cached("SELECT id, title, note FROM items WHERE id = ?1")?;
         let (item_id, title, note) = stmt.query_row([id], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -474,7 +457,7 @@ pub fn fetch_item(id: i64) -> Result<EditableItem> {
             ))
         })?;
 
-        let mut image_stmt = conn.prepare(
+        let mut image_stmt = conn.prepare_cached(
             "SELECT image_key, image
              FROM item_images
              WHERE item_id = ?1
@@ -499,38 +482,47 @@ pub fn fetch_item(id: i64) -> Result<EditableItem> {
     })
 }
 
-pub fn update_item(id: i64, note: &str, images: &[NoteImage]) -> Result<()> {
-    ensure!(
-        images.len() <= MAX_NOTE_IMAGE_COUNT,
-        "too many note images (max {MAX_NOTE_IMAGE_COUNT})"
-    );
-
-    for image in images {
+pub fn update_item(id: i64, note: &str, images: Option<&[NoteImage]>) -> Result<()> {
+    if let Some(images) = images {
         ensure!(
-            image.bytes.len() <= MAX_SCREENSHOT_BYTES,
-            "image '{}' exceeds {} KB storage limit",
-            image.image_key,
-            MAX_SCREENSHOT_BYTES / 1024
+            images.len() <= MAX_NOTE_IMAGE_COUNT,
+            "too many note images (max {MAX_NOTE_IMAGE_COUNT})"
         );
+
+        for image in images {
+            ensure!(
+                image.bytes.len() <= MAX_SCREENSHOT_BYTES,
+                "image '{}' exceeds {} KB storage limit",
+                image.image_key,
+                MAX_SCREENSHOT_BYTES / 1024
+            );
+        }
     }
 
     run_with_recovery(|conn| {
-        let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "UPDATE items SET note = ?1 WHERE id = ?2",
-            params![note, id],
-        )?;
-        tx.execute("DELETE FROM item_images WHERE item_id = ?1", [id])?;
-        {
-            let mut insert = tx.prepare(
-                "INSERT INTO item_images(item_id, image_key, image, created_at)
-                 VALUES (?1, ?2, ?3, strftime('%s', 'now'))",
+        if let Some(images) = images {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE items SET note = ?1 WHERE id = ?2",
+                params![note, id],
             )?;
-            for image in images {
-                insert.execute(params![id, image.image_key, image.bytes])?;
+            tx.execute("DELETE FROM item_images WHERE item_id = ?1", [id])?;
+            {
+                let mut insert = tx.prepare(
+                    "INSERT INTO item_images(item_id, image_key, image, created_at)
+                     VALUES (?1, ?2, ?3, strftime('%s', 'now'))",
+                )?;
+                for image in images {
+                    insert.execute(params![id, image.image_key, image.bytes])?;
+                }
             }
+            tx.commit()?;
+        } else {
+            conn.execute(
+                "UPDATE items SET note = ?1 WHERE id = ?2",
+                params![note, id],
+            )?;
         }
-        tx.commit()?;
         Ok(())
     })
 }
@@ -541,8 +533,9 @@ fn build_snippet(
     keywords: &str,
     note: &str,
     query: &str,
+    query_lower: &str,
 ) -> Option<(String, String)> {
-    if query.trim().is_empty() {
+    if query.is_empty() {
         return None;
     }
     let parts = [
@@ -551,7 +544,7 @@ fn build_snippet(
         ("keywords", keywords),
         ("note", note),
     ];
-    let needle = query.to_lowercase();
+    let needle = query_lower;
     for (source, text) in parts {
         if text.is_empty() {
             continue;
@@ -579,4 +572,44 @@ fn build_snippet(
         }
     }
     None
+}
+
+fn map_search_row(
+    row: &rusqlite::Row<'_>,
+    query: &str,
+    query_lower: &str,
+) -> rusqlite::Result<SearchResult> {
+    let title: String = row.get(1)?;
+    let subtitle: String = row.get(2)?;
+    let note: String = row.get(3)?;
+    let keywords: String = row.get(4)?;
+    let snippet_data = build_snippet(&title, &subtitle, &keywords, &note, query, query_lower);
+
+    Ok(SearchResult {
+        id: row.get(0)?,
+        title,
+        subtitle,
+        snippet: snippet_data.as_ref().map(|(_, text)| text.clone()),
+        snippet_source: snippet_data.as_ref().map(|(source, _)| source.clone()),
+    })
+}
+
+fn build_fts_query(query: &str) -> Option<String> {
+    let mut terms = Vec::new();
+    for token in query.split_whitespace().take(12) {
+        let sanitized: String = token
+            .chars()
+            .filter(|ch| ch.is_alphanumeric() || *ch == '_' || *ch == '-')
+            .take(64)
+            .collect();
+        if !sanitized.is_empty() {
+            terms.push(format!("{sanitized}*"));
+        }
+    }
+
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" "))
+    }
 }
