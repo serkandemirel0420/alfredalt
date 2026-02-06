@@ -8,8 +8,8 @@ use app::LauncherApp;
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 460.0])
-            .with_min_inner_size([620.0, 420.0])
+            .with_inner_size([1100.0, 220.0])
+            .with_min_inner_size([620.0, 200.0])
             .with_resizable(true)
             .with_transparent(true)
             .with_decorations(false)

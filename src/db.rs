@@ -516,7 +516,10 @@ pub fn update_item(id: i64, note: &str, images: &[NoteImage]) -> Result<()> {
 
     run_with_recovery(|conn| {
         let tx = conn.unchecked_transaction()?;
-        tx.execute("UPDATE items SET note = ?1 WHERE id = ?2", params![note, id])?;
+        tx.execute(
+            "UPDATE items SET note = ?1 WHERE id = ?2",
+            params![note, id],
+        )?;
         tx.execute("DELETE FROM item_images WHERE item_id = ?1", [id])?;
         {
             let mut insert = tx.prepare(

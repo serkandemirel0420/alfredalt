@@ -1,7 +1,9 @@
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{
+    collections::HashMap,
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
 };
@@ -15,18 +17,36 @@ use image::{
     imageops::FilterType as ResizeFilterType,
 };
 
-use crate::db::{MAX_NOTE_IMAGE_COUNT, MAX_SCREENSHOT_BYTES, fetch_item, insert_item, search, update_item};
+use crate::db::{
+    MAX_NOTE_IMAGE_COUNT, MAX_SCREENSHOT_BYTES, fetch_item, insert_item, search, update_item,
+};
 use crate::hotkey::{HotKeyRegistration, setup_hotkey_listener};
 use crate::models::{AppMessage, EditableItem, NoteImage, SearchResult};
 
 const SEARCH_LIMIT: i64 = 8;
 const SEARCH_DEBOUNCE_MS: u64 = 160;
 const EDITOR_IDLE_AUTOSAVE_MS: u64 = 1200;
+const LAUNCHER_DEFAULT_WIDTH: f32 = 1100.0;
+const LAUNCHER_EMPTY_HEIGHT: f32 = 220.0;
+const LAUNCHER_NO_RESULTS_HEIGHT: f32 = 250.0;
+const LAUNCHER_RESULTS_BASE_HEIGHT: f32 = 190.0;
+const LAUNCHER_RESULT_ROW_HEIGHT: f32 = 60.0;
+const LAUNCHER_MAX_VISIBLE_ROWS: usize = 5;
+const LAUNCHER_MAX_HEIGHT: f32 = 500.0;
 const SCREENSHOT_MAX_DIMENSION_WIDTH: u32 = 1920;
 const SCREENSHOT_MAX_DIMENSION_HEIGHT: u32 = 1080;
 const SCREENSHOT_MAX_PIXELS: u64 = 8_294_400; // 3840x2160
 const SCREENSHOT_MAX_INPUT_BYTES: usize = 20 * 1024 * 1024;
 const NOTE_IMAGE_URL_PREFIX: &str = "alfred://image/";
+const SCREENSHOT_MARKDOWN_REF: &str = "![image](alfred://image/main)";
+const INLINE_IMAGE_MAX_HEIGHT: f32 = 180.0;
+const INLINE_IMAGE_ROW_HEIGHT: f32 = INLINE_IMAGE_MAX_HEIGHT + 12.0;
+const INLINE_IMAGE_PADDING_X: f32 = 6.0;
+const INLINE_IMAGE_PADDING_Y: f32 = 6.0;
+
+fn markdown_image_ref(key: &str) -> String {
+    format!("![image]({}{key})", NOTE_IMAGE_URL_PREFIX)
+}
 
 #[derive(Clone, Copy)]
 enum EscapeAction {
@@ -51,23 +71,20 @@ struct DecodedImage {
     rgba: Vec<u8>,
 }
 
+#[derive(Clone)]
+struct InlineImageMarker {
+    key: String,
+    start_char: usize,
+    start_byte: usize,
+    end_byte: usize,
+}
+
 #[derive(Default, Clone, Copy)]
 struct EditorActions {
-    paste_image: bool,
-    capture_image: bool,
     remove_image: bool,
 }
 
 enum EditorTask {
-    CaptureScreenshot {
-        item_id: i64,
-    },
-    DecodeScreenshot {
-        item_id: i64,
-        request_id: u64,
-        screenshot_version: u64,
-        bytes: Vec<u8>,
-    },
     SaveItem {
         item_id: i64,
         content_hash: u64,
@@ -77,16 +94,6 @@ enum EditorTask {
 }
 
 enum EditorTaskResult {
-    ScreenshotCaptured {
-        item_id: i64,
-        result: Result<Option<Vec<u8>>, String>,
-    },
-    ScreenshotDecoded {
-        item_id: i64,
-        request_id: u64,
-        screenshot_version: u64,
-        result: Result<DecodedImage, String>,
-    },
     ItemSaved {
         item_id: i64,
         content_hash: u64,
@@ -105,8 +112,6 @@ pub struct LauncherApp {
     launcher_hidden_for_editor: bool,
     editor_open: bool,
     editor_item: Option<EditableItem>,
-    editor_texture: Option<egui::TextureHandle>,
-    editor_texture_viewport: Option<egui::ViewportId>,
     editor_text_id: Option<egui::Id>,
     editor_needs_focus: bool,
     editor_dirty: bool,
@@ -114,13 +119,10 @@ pub struct LauncherApp {
     last_saved_editor_hash: Option<u64>,
     save_in_flight: Option<(i64, u64)>,
     selected_image_key: Option<String>,
+    editor_cursor_char_index: Option<usize>,
+    inline_image_textures: HashMap<String, egui::TextureHandle>,
+    inline_image_texture_viewport: Option<egui::ViewportId>,
     next_image_seq: u64,
-    screenshot_version: u64,
-    decoded_screenshot_version: Option<u64>,
-    decoded_screenshot: Option<DecodedImage>,
-    decode_request_seq: u64,
-    decode_in_flight: Option<(i64, u64, u64)>,
-    screenshot_capture_in_flight: bool,
     hotkey_rx: std::sync::mpsc::Receiver<AppMessage>,
     hotkey_enabled: bool,
     _hotkey: Option<HotKeyRegistration>,
@@ -131,6 +133,7 @@ pub struct LauncherApp {
     pending_search_at: Option<Instant>,
     next_search_seq: u64,
     in_flight_search_seq: Option<u64>,
+    last_launcher_size: Option<[f32; 2]>,
 }
 
 impl LauncherApp {
@@ -151,8 +154,6 @@ impl LauncherApp {
             launcher_hidden_for_editor: false,
             editor_open: false,
             editor_item: None,
-            editor_texture: None,
-            editor_texture_viewport: None,
             editor_text_id: None,
             editor_needs_focus: false,
             editor_dirty: false,
@@ -160,13 +161,10 @@ impl LauncherApp {
             last_saved_editor_hash: None,
             save_in_flight: None,
             selected_image_key: None,
+            editor_cursor_char_index: None,
+            inline_image_textures: HashMap::new(),
+            inline_image_texture_viewport: None,
             next_image_seq: 0,
-            screenshot_version: 0,
-            decoded_screenshot_version: None,
-            decoded_screenshot: None,
-            decode_request_seq: 0,
-            decode_in_flight: None,
-            screenshot_capture_in_flight: false,
             hotkey_rx,
             hotkey_enabled,
             _hotkey: hotkey,
@@ -177,6 +175,7 @@ impl LauncherApp {
             pending_search_at: None,
             next_search_seq: 0,
             in_flight_search_seq: None,
+            last_launcher_size: None,
         };
         app.schedule_search(true);
         if !start_visible {
@@ -191,23 +190,6 @@ impl LauncherApp {
         std::thread::spawn(move || {
             while let Ok(task) = task_rx.recv() {
                 let message = match task {
-                    EditorTask::CaptureScreenshot { item_id } => {
-                        EditorTaskResult::ScreenshotCaptured {
-                            item_id,
-                            result: capture_screenshot_bytes(),
-                        }
-                    }
-                    EditorTask::DecodeScreenshot {
-                        item_id,
-                        request_id,
-                        screenshot_version,
-                        bytes,
-                    } => EditorTaskResult::ScreenshotDecoded {
-                        item_id,
-                        request_id,
-                        screenshot_version,
-                        result: decode_screenshot_bytes(&bytes),
-                    },
                     EditorTask::SaveItem {
                         item_id,
                         content_hash,
@@ -277,6 +259,7 @@ impl LauncherApp {
 
     fn show_launcher(&mut self, ctx: &egui::Context) {
         self.visible = true;
+        self.last_launcher_size = None;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         self.needs_focus = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -285,6 +268,42 @@ impl LauncherApp {
     fn hide_launcher(&mut self, ctx: &egui::Context) {
         self.visible = false;
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    fn desired_launcher_height(&self) -> f32 {
+        if self.query.trim().is_empty() {
+            return LAUNCHER_EMPTY_HEIGHT;
+        }
+
+        if self.results.is_empty() {
+            return LAUNCHER_NO_RESULTS_HEIGHT;
+        }
+
+        let visible_rows = self.results.len().min(LAUNCHER_MAX_VISIBLE_ROWS) as f32;
+        (LAUNCHER_RESULTS_BASE_HEIGHT + visible_rows * LAUNCHER_RESULT_ROW_HEIGHT)
+            .clamp(LAUNCHER_NO_RESULTS_HEIGHT, LAUNCHER_MAX_HEIGHT)
+    }
+
+    fn sync_launcher_size(&mut self, ctx: &egui::Context) {
+        if !self.visible || self.editor_open {
+            return;
+        }
+
+        let target = [LAUNCHER_DEFAULT_WIDTH, self.desired_launcher_height()];
+        let needs_resize = match self.last_launcher_size {
+            Some(last) => {
+                (last[0] - target[0]).abs() > f32::EPSILON
+                    || (last[1] - target[1]).abs() > f32::EPSILON
+            }
+            None => true,
+        };
+
+        if needs_resize {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                target[0], target[1],
+            )));
+            self.last_launcher_size = Some(target);
+        }
     }
 
     fn schedule_search(&mut self, immediate: bool) {
@@ -392,7 +411,6 @@ impl LauncherApp {
         match fetch_item(item_id) {
             Ok(item) => {
                 let initial_hash = Self::editor_content_hash(&item);
-                let has_images = !item.images.is_empty();
                 let selected_image_key = item.images.first().map(|img| img.image_key.clone());
                 self.editor_item = Some(item);
                 self.editor_open = true;
@@ -406,14 +424,10 @@ impl LauncherApp {
                 self.last_saved_editor_hash = Some(initial_hash);
                 self.save_in_flight = None;
                 self.selected_image_key = selected_image_key;
+                self.editor_cursor_char_index = None;
+                self.inline_image_textures.clear();
+                self.inline_image_texture_viewport = None;
                 self.next_image_seq = 0;
-                self.editor_texture = None;
-                self.editor_texture_viewport = None;
-                self.screenshot_version = if has_images { 1 } else { 0 };
-                self.decoded_screenshot_version = None;
-                self.decoded_screenshot = None;
-                self.decode_in_flight = None;
-                self.screenshot_capture_in_flight = false;
                 self.editor_text_id = None;
                 ctx.request_repaint();
             }
@@ -453,89 +467,6 @@ impl LauncherApp {
         true
     }
 
-    fn ensure_editor_texture_for(&mut self, ctx: &egui::Context) {
-        let Some(item) = self.editor_item.as_ref() else {
-            self.editor_texture = None;
-            self.editor_texture_viewport = None;
-            self.decoded_screenshot = None;
-            self.decoded_screenshot_version = None;
-            self.decode_in_flight = None;
-            return;
-        };
-
-        let Some(bytes) = self.current_image_bytes(item) else {
-            self.editor_texture = None;
-            self.editor_texture_viewport = None;
-            self.decoded_screenshot = None;
-            self.decoded_screenshot_version = None;
-            self.decode_in_flight = None;
-            return;
-        };
-
-        if self.editor_texture.is_some() && self.editor_texture_viewport == Some(ctx.viewport_id())
-        {
-            return;
-        }
-
-        if self.decoded_screenshot_version == Some(self.screenshot_version) {
-            if let Some(decoded) = self.decoded_screenshot.as_ref() {
-                let color_image =
-                    egui::ColorImage::from_rgba_unmultiplied(decoded.size, decoded.rgba.as_slice());
-                self.editor_texture = Some(ctx.load_texture(
-                    format!("note-shot-{}", item.id),
-                    color_image,
-                    egui::TextureOptions::LINEAR,
-                ));
-                self.editor_texture_viewport = Some(ctx.viewport_id());
-            }
-            return;
-        }
-
-        if self
-            .decode_in_flight
-            .map(|(in_flight_item, _, in_flight_version)| {
-                in_flight_item == item.id && in_flight_version == self.screenshot_version
-            })
-            .unwrap_or(false)
-        {
-            return;
-        }
-
-        self.decode_request_seq = self.decode_request_seq.wrapping_add(1);
-        let request_id = self.decode_request_seq;
-        let screenshot_version = self.screenshot_version;
-        self.decode_in_flight = Some((item.id, request_id, screenshot_version));
-        let task = EditorTask::DecodeScreenshot {
-            item_id: item.id,
-            request_id,
-            screenshot_version,
-            bytes: bytes.clone(),
-        };
-        if let Err(err) = self.editor_task_tx.send(task) {
-            self.decode_in_flight = None;
-            self.last_error = Some(format!("Failed to queue screenshot decode: {err}"));
-        }
-    }
-
-    fn capture_screenshot(&mut self) {
-        let Some(item) = self.editor_item.as_ref() else {
-            return;
-        };
-        if self.screenshot_capture_in_flight {
-            return;
-        }
-
-        if let Err(err) = self
-            .editor_task_tx
-            .send(EditorTask::CaptureScreenshot { item_id: item.id })
-        {
-            self.last_error = Some(format!("Failed to queue screenshot capture: {err}"));
-            return;
-        }
-
-        self.screenshot_capture_in_flight = true;
-    }
-
     fn try_paste_clipboard_image(&mut self) {
         let mut clipboard = match Clipboard::new() {
             Ok(clipboard) => clipboard,
@@ -545,39 +476,71 @@ impl LauncherApp {
             }
         };
 
-        let image = match clipboard.get_image() {
-            Ok(image) => image,
-            Err(arboard::Error::ContentNotAvailable) => return,
-            Err(err) => {
-                self.last_error = Some(format!("Could not read clipboard image: {err}"));
-                return;
-            }
-        };
+        let mut paste_error: Option<String> = None;
 
-        let rgba = match Self::clipboard_image_to_rgba(image) {
-            Ok(rgba) => rgba,
-            Err(err) => {
-                self.last_error = Some(format!("Clipboard image format not supported: {err}"));
-                return;
-            }
-        };
+        match clipboard.get_image() {
+            Ok(image) => {
+                let rgba = match Self::clipboard_image_to_rgba(image) {
+                    Ok(rgba) => rgba,
+                    Err(err) => {
+                        self.last_error =
+                            Some(format!("Clipboard image format not supported: {err}"));
+                        return;
+                    }
+                };
 
-        let dyn_image = image::DynamicImage::ImageRgba8(rgba);
-        let mut png_bytes = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut png_bytes);
-        if let Err(err) = dyn_image.write_to(&mut cursor, ImageFormat::Png) {
-            self.last_error = Some(format!("Could not encode pasted image: {err}"));
-            return;
+                let dyn_image = image::DynamicImage::ImageRgba8(rgba);
+                let mut png_bytes = Vec::new();
+                let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                if let Err(err) = dyn_image.write_to(&mut cursor, ImageFormat::Png) {
+                    self.last_error = Some(format!("Could not encode pasted image: {err}"));
+                    return;
+                }
+
+                match normalize_screenshot_for_storage(&png_bytes) {
+                    Ok(stored_bytes) => {
+                        self.add_image_to_editor(
+                            stored_bytes,
+                            "pasted",
+                            self.editor_cursor_char_index,
+                        );
+                        self.last_error = None;
+                        return;
+                    }
+                    Err(err) => {
+                        self.last_error = Some(format!("Could not use pasted image: {err}"));
+                        return;
+                    }
+                }
+            }
+            Err(arboard::Error::ContentNotAvailable) => {}
+            Err(err) => {
+                paste_error = Some(format!("Could not read clipboard image: {err}"));
+            }
         }
 
-        match normalize_screenshot_for_storage(&png_bytes) {
-            Ok(stored_bytes) => {
-                self.add_image_to_editor(stored_bytes, "pasted");
-                self.last_error = None;
-            }
+        match Self::read_macos_clipboard_image() {
+            Ok(Some(bytes)) => match normalize_screenshot_for_storage(&bytes) {
+                Ok(stored_bytes) => {
+                    self.add_image_to_editor(stored_bytes, "pasted", self.editor_cursor_char_index);
+                    self.last_error = None;
+                    return;
+                }
+                Err(err) => {
+                    self.last_error = Some(format!("Could not use pasted image: {err}"));
+                    return;
+                }
+            },
+            Ok(None) => {}
             Err(err) => {
-                self.last_error = Some(format!("Could not use pasted image: {err}"));
+                if paste_error.is_none() {
+                    paste_error = Some(err);
+                }
             }
+        }
+
+        if let Some(err) = paste_error {
+            self.last_error = Some(err);
         }
     }
 
@@ -585,8 +548,6 @@ impl LauncherApp {
         self.queue_editor_save();
         self.editor_open = false;
         self.editor_item = None;
-        self.editor_texture = None;
-        self.editor_texture_viewport = None;
         self.editor_text_id = None;
         self.editor_needs_focus = false;
         self.editor_dirty = false;
@@ -594,12 +555,10 @@ impl LauncherApp {
         self.last_saved_editor_hash = None;
         self.save_in_flight = None;
         self.selected_image_key = None;
+        self.editor_cursor_char_index = None;
+        self.inline_image_textures.clear();
+        self.inline_image_texture_viewport = None;
         self.next_image_seq = 0;
-        self.screenshot_version = 0;
-        self.decoded_screenshot_version = None;
-        self.decoded_screenshot = None;
-        self.decode_in_flight = None;
-        self.screenshot_capture_in_flight = false;
         if self.launcher_hidden_for_editor {
             self.launcher_hidden_for_editor = false;
             if self.visible {
@@ -617,12 +576,8 @@ impl LauncherApp {
     }
 
     fn mark_screenshot_changed(&mut self) {
-        self.screenshot_version = self.screenshot_version.wrapping_add(1);
-        self.editor_texture = None;
-        self.editor_texture_viewport = None;
-        self.decoded_screenshot = None;
-        self.decoded_screenshot_version = None;
-        self.decode_in_flight = None;
+        self.inline_image_textures.clear();
+        self.inline_image_texture_viewport = None;
         self.mark_editor_dirty();
     }
 
@@ -644,53 +599,6 @@ impl LauncherApp {
     fn apply_editor_task_results(&mut self) {
         loop {
             match self.editor_task_rx.try_recv() {
-                Ok(EditorTaskResult::ScreenshotCaptured { item_id, result }) => {
-                    self.screenshot_capture_in_flight = false;
-                    match result {
-                        Ok(Some(bytes)) => {
-                            if self.editor_item.as_ref().map(|item| item.id) == Some(item_id) {
-                                self.add_image_to_editor(bytes, "shot");
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            self.last_error = Some(err);
-                        }
-                    }
-                }
-                Ok(EditorTaskResult::ScreenshotDecoded {
-                    item_id,
-                    request_id,
-                    screenshot_version,
-                    result,
-                }) => {
-                    if self.decode_in_flight == Some((item_id, request_id, screenshot_version)) {
-                        self.decode_in_flight = None;
-                    }
-
-                    let active_item_matches = self
-                        .editor_item
-                        .as_ref()
-                        .map(|item| item.id == item_id)
-                        .unwrap_or(false);
-                    if !active_item_matches || self.screenshot_version != screenshot_version {
-                        continue;
-                    }
-
-                    match result {
-                        Ok(decoded) => {
-                            self.decoded_screenshot = Some(decoded);
-                            self.decoded_screenshot_version = Some(screenshot_version);
-                            self.editor_texture = None;
-                            self.editor_texture_viewport = None;
-                        }
-                        Err(err) => {
-                            self.last_error = Some(format!("Failed to decode screenshot: {err}"));
-                            self.decoded_screenshot = None;
-                            self.decoded_screenshot_version = None;
-                        }
-                    }
-                }
                 Ok(EditorTaskResult::ItemSaved {
                     item_id,
                     content_hash,
@@ -742,16 +650,12 @@ impl LauncherApp {
         hasher.finish()
     }
 
-    fn current_image_bytes(&self, item: &EditableItem) -> Option<Vec<u8>> {
-        if let Some(selected) = self.selected_image_key.as_deref() {
-            if let Some(found) = item.images.iter().find(|img| img.image_key == selected) {
-                return Some(found.bytes.clone());
-            }
-        }
-        item.images.first().map(|img| img.bytes.clone())
-    }
-
-    fn add_image_to_editor(&mut self, bytes: Vec<u8>, label: &str) {
+    fn add_image_to_editor(
+        &mut self,
+        bytes: Vec<u8>,
+        label: &str,
+        cursor_char_index: Option<usize>,
+    ) {
         if let Some(item) = self.editor_item.as_mut() {
             if item.images.len() >= MAX_NOTE_IMAGE_COUNT {
                 self.last_error = Some(format!(
@@ -766,9 +670,194 @@ impl LauncherApp {
                 image_key: key.clone(),
                 bytes,
             });
-            Self::ensure_markdown_image_ref(&mut item.note, &key);
+            Self::insert_markdown_image_ref(&mut item.note, &key, cursor_char_index);
             self.selected_image_key = Some(key);
             self.mark_screenshot_changed();
+        }
+    }
+
+    fn image_key_from_markdown_line(line: &str) -> Option<&str> {
+        let marker_prefix = "![image](";
+        if !line.starts_with(marker_prefix) || !line.ends_with(')') {
+            return None;
+        }
+
+        let url = &line[marker_prefix.len()..line.len() - 1];
+        url.strip_prefix(NOTE_IMAGE_URL_PREFIX)
+    }
+
+    fn inline_image_markers(note: &str) -> Vec<InlineImageMarker> {
+        let mut markers = Vec::new();
+        let mut byte_offset = 0usize;
+        let mut char_offset = 0usize;
+
+        for line_with_break in note.split_inclusive('\n') {
+            let has_newline = line_with_break.ends_with('\n');
+            let line = if has_newline {
+                &line_with_break[..line_with_break.len() - 1]
+            } else {
+                line_with_break
+            };
+
+            if let Some(key) = Self::image_key_from_markdown_line(line) {
+                markers.push(InlineImageMarker {
+                    key: key.to_string(),
+                    start_char: char_offset,
+                    start_byte: byte_offset,
+                    end_byte: byte_offset + line.len(),
+                });
+            }
+
+            byte_offset += line_with_break.len();
+            char_offset += line.chars().count();
+            if has_newline {
+                char_offset += 1;
+            }
+        }
+
+        markers
+    }
+
+    fn layout_editor_note(
+        ui: &egui::Ui,
+        text: &str,
+        wrap_width: f32,
+    ) -> std::sync::Arc<egui::Galley> {
+        let markers = Self::inline_image_markers(text);
+        let mut job = LayoutJob::default();
+        job.wrap.max_width = wrap_width;
+
+        let base_format = TextFormat {
+            font_id: egui::FontId::proportional(15.0),
+            color: ui.visuals().text_color(),
+            ..Default::default()
+        };
+
+        let mut marker_format = base_format.clone();
+        marker_format.color = Color32::TRANSPARENT;
+        marker_format.line_height = Some(INLINE_IMAGE_ROW_HEIGHT);
+
+        let mut from = 0usize;
+        for marker in markers {
+            if from < marker.start_byte {
+                job.append(&text[from..marker.start_byte], 0.0, base_format.clone());
+            }
+            job.append(
+                &text[marker.start_byte..marker.end_byte],
+                0.0,
+                marker_format.clone(),
+            );
+            from = marker.end_byte;
+        }
+        if from < text.len() {
+            job.append(&text[from..], 0.0, base_format);
+        }
+        if job.sections.is_empty() {
+            job.append("", 0.0, TextFormat::default());
+        }
+
+        ui.fonts(|fonts| fonts.layout_job(job))
+    }
+
+    fn row_rect_for_char(galley: &egui::Galley, char_index: usize) -> Option<egui::Rect> {
+        let mut cursor = 0usize;
+        for row in &galley.rows {
+            let row_chars = row.char_count_excluding_newline();
+            if char_index <= cursor + row_chars {
+                return Some(row.rect);
+            }
+            cursor += row.char_count_including_newline();
+        }
+        galley.rows.last().map(|row| row.rect)
+    }
+
+    fn ensure_inline_image_texture(
+        &mut self,
+        ctx: &egui::Context,
+        key: &str,
+    ) -> Option<egui::TextureHandle> {
+        if self.inline_image_texture_viewport != Some(ctx.viewport_id()) {
+            self.inline_image_textures.clear();
+            self.inline_image_texture_viewport = Some(ctx.viewport_id());
+        }
+
+        if let Some(texture) = self.inline_image_textures.get(key) {
+            return Some(texture.clone());
+        }
+
+        let (item_id, bytes) = {
+            let item = self.editor_item.as_ref()?;
+            let image = item
+                .images
+                .iter()
+                .find(|img| img.image_key == key)
+                .or_else(|| {
+                    if key == "main" {
+                        item.images.first()
+                    } else {
+                        None
+                    }
+                })?;
+            (item.id, image.bytes.clone())
+        };
+
+        let decoded = decode_screenshot_bytes(&bytes).ok()?;
+        let color_image =
+            egui::ColorImage::from_rgba_unmultiplied(decoded.size, decoded.rgba.as_slice());
+        let texture = ctx.load_texture(
+            format!("note-inline-{item_id}-{key}"),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.inline_image_textures
+            .insert(key.to_string(), texture.clone());
+        Some(texture)
+    }
+
+    fn paint_inline_images(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        output: &egui::text_edit::TextEditOutput,
+        note: &str,
+    ) {
+        let markers = Self::inline_image_markers(note);
+        if markers.is_empty() {
+            return;
+        }
+
+        let painter = ui.painter().with_clip_rect(output.text_clip_rect);
+        for marker in markers {
+            let Some(row_rect) = Self::row_rect_for_char(&output.galley, marker.start_char) else {
+                continue;
+            };
+            let Some(texture) = self.ensure_inline_image_texture(ctx, &marker.key) else {
+                continue;
+            };
+
+            let tex_size = texture.size_vec2();
+            if tex_size.x <= 0.0 || tex_size.y <= 0.0 {
+                continue;
+            }
+
+            let max_width =
+                (output.text_clip_rect.width() - INLINE_IMAGE_PADDING_X * 2.0).max(32.0);
+            let scale = (max_width / tex_size.x)
+                .min(INLINE_IMAGE_MAX_HEIGHT / tex_size.y)
+                .min(1.0);
+            let draw_size = tex_size * scale;
+
+            let top_left = egui::pos2(
+                output.galley_pos.x + row_rect.left() + INLINE_IMAGE_PADDING_X,
+                output.galley_pos.y + row_rect.top() + INLINE_IMAGE_PADDING_Y,
+            );
+            let image_rect = egui::Rect::from_min_size(top_left, draw_size);
+            painter.image(
+                texture.id(),
+                image_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
         }
     }
 
@@ -831,10 +920,11 @@ impl LauncherApp {
     }
 
     fn render_editor_contents(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> EditorActions {
-        self.ensure_editor_texture_for(ctx);
         let mut note_changed = false;
         let mut actions = EditorActions::default();
         let is_dirty = self.editor_dirty;
+        let mut inline_output: Option<egui::text_edit::TextEditOutput> = None;
+        let mut note_for_inline: Option<String> = None;
 
         if let Some(item) = self.editor_item.as_mut() {
             ui.horizontal_wrapped(|ui| {
@@ -850,18 +940,12 @@ impl LauncherApp {
             ui.add_space(4.0);
 
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Paste Image").clicked() {
-                    actions.paste_image = true;
-                }
-                if ui.button("Capture Screenshot").clicked() {
-                    actions.capture_image = true;
-                }
-                if item.screenshot.is_some() && ui.button("Remove Image").clicked() {
+                if !item.images.is_empty() && ui.button("Remove Image").clicked() {
                     actions.remove_image = true;
                 }
                 ui.label(
                     egui::RichText::new(
-                        "Markdown note: pasted images are stored as `alfred://image/main`.",
+                        "Paste images with Cmd/Ctrl+V; they appear inline where you paste.",
                     )
                     .size(11.0)
                     .color(egui::Color32::from_gray(90)),
@@ -871,72 +955,41 @@ impl LauncherApp {
 
             let controls_height = 32.0;
             let editor_height = (ui.available_height() - controls_height).max(200.0);
-            let has_screenshot = item.screenshot.is_some();
-            let full_width = ui.available_width();
-            let left_width = if has_screenshot {
-                (full_width * 0.68).clamp(380.0, full_width - 200.0)
-            } else {
-                full_width
-            };
+            let editor_id = ui.make_persistent_id("note_editor_modal_text");
+            self.editor_text_id = Some(editor_id);
 
-            ui.horizontal_top(|ui| {
-                let editor_id = ui.make_persistent_id("note_editor_modal_text");
-                self.editor_text_id = Some(editor_id);
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                let desired_rows = ((editor_height / 20.0).round() as usize).max(10);
+                let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
+                    Self::layout_editor_note(ui, text, wrap_width)
+                };
+                let output = TextEdit::multiline(&mut item.note)
+                    .id_source(editor_id)
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(desired_rows)
+                    .font(egui::TextStyle::Body)
+                    .layouter(&mut layouter)
+                    .show(ui);
 
-                ui.vertical(|ui| {
-                    ui.set_width(left_width);
-                    let response = ui.add_sized(
-                        [left_width, editor_height],
-                        TextEdit::multiline(&mut item.note)
-                            .id_source(editor_id)
-                            .desired_width(f32::INFINITY)
-                            .font(egui::TextStyle::Body),
-                    );
-
-                    if self.editor_needs_focus {
-                        response.request_focus();
-                        self.editor_needs_focus = false;
-                    }
-
-                    if response.changed() {
-                        note_changed = true;
-                    }
-                });
-
-                if has_screenshot {
-                    ui.add_space(8.0);
-                    let right_width = (full_width - left_width - 8.0).max(180.0);
-                    ui.vertical(|ui| {
-                        ui.set_width(right_width);
-                        ui.label(egui::RichText::new("Screenshot").strong().size(13.0));
-
-                        egui::Frame::none()
-                            .fill(egui::Color32::from_rgb(236, 236, 236))
-                            .rounding(egui::Rounding::same(8.0))
-                            .inner_margin(egui::Margin::same(6.0))
-                            .show(ui, |ui| {
-                                ui.set_min_height((editor_height - 34.0).max(120.0));
-                                if let Some(texture) = self.editor_texture.as_ref() {
-                                    let size = texture.size_vec2();
-                                    let max = egui::vec2(
-                                        ui.available_width().max(120.0),
-                                        (editor_height - 56.0).max(110.0),
-                                    );
-                                    let scale = (max.x / size.x).min(max.y / size.y).min(1.0);
-                                    ui.centered_and_justified(|ui| {
-                                        ui.image((texture.id(), size * scale));
-                                    });
-                                } else {
-                                    ui.centered_and_justified(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("Loading preview...")
-                                                .color(egui::Color32::from_gray(90)),
-                                        );
-                                    });
-                                }
-                            });
-                    });
+                if self.editor_needs_focus {
+                    output.response.request_focus();
+                    self.editor_needs_focus = false;
                 }
+
+                if output.response.changed() {
+                    note_changed = true;
+                }
+
+                if let Some(range) = output.state.cursor.char_range() {
+                    let pos = range.primary.index.min(item.note.chars().count());
+                    self.editor_cursor_char_index = Some(pos);
+                } else {
+                    self.editor_cursor_char_index = Some(item.note.chars().count());
+                }
+
+                note_for_inline = Some(item.note.clone());
+                inline_output = Some(output);
             });
 
             if let Some(err) = &self.last_error {
@@ -947,6 +1000,10 @@ impl LauncherApp {
 
         if note_changed {
             self.mark_editor_dirty();
+        }
+
+        if let (Some(output), Some(note)) = (inline_output.as_ref(), note_for_inline.as_deref()) {
+            self.paint_inline_images(ctx, ui, output, note);
         }
 
         actions
@@ -960,7 +1017,6 @@ impl LauncherApp {
         let mut open_flag = self.editor_open;
         let mut save_now = false;
         let mut close_now = false;
-        let mut capture_now = false;
         let mut paste_now = false;
         let mut remove_image_now = false;
         let viewport_id = Self::editor_viewport_id();
@@ -998,8 +1054,6 @@ impl LauncherApp {
                         .collapsible(false)
                         .show(editor_ctx, |ui| {
                             let actions = self.render_editor_contents(editor_ctx, ui);
-                            paste_now |= actions.paste_image;
-                            capture_now |= actions.capture_image;
                             remove_image_now |= actions.remove_image;
                         });
                 }
@@ -1008,8 +1062,6 @@ impl LauncherApp {
                 | egui::ViewportClass::Immediate => {
                     egui::CentralPanel::default().show(editor_ctx, |ui| {
                         let actions = self.render_editor_contents(editor_ctx, ui);
-                        paste_now |= actions.paste_image;
-                        capture_now |= actions.capture_image;
                         remove_image_now |= actions.remove_image;
                     });
                 }
@@ -1031,13 +1083,8 @@ impl LauncherApp {
                 paste_now = false;
             }
 
-            if capture_now {
-                self.capture_screenshot();
-                capture_now = false;
-            }
-
             if remove_image_now {
-                self.clear_screenshot();
+                self.remove_selected_image();
                 remove_image_now = false;
             }
         });
@@ -1072,6 +1119,30 @@ impl LauncherApp {
             .events
             .iter()
             .any(|event| matches!(event, egui::Event::Paste(_)))
+    }
+
+    fn read_macos_clipboard_image() -> Result<Option<Vec<u8>>, String> {
+        #[cfg(target_os = "macos")]
+        {
+            for flavor in ["png", "tiff"] {
+                let output = Command::new("pbpaste")
+                    .args(["-Prefer", flavor])
+                    .output()
+                    .map_err(|err| format!("pbpaste failed: {err}"))?;
+                if !output.status.success() || output.stdout.is_empty() {
+                    continue;
+                }
+                if image::load_from_memory(&output.stdout).is_ok() {
+                    return Ok(Some(output.stdout));
+                }
+            }
+            Ok(None)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(None)
+        }
     }
 
     fn clipboard_image_to_rgba(
@@ -1150,18 +1221,40 @@ impl LauncherApp {
         ))
     }
 
-    fn ensure_markdown_image_ref(note: &mut String) {
-        if note.contains(SCREENSHOT_MARKDOWN_REF) {
-            return;
+    fn insert_markdown_image_ref(note: &mut String, key: &str, cursor_char_index: Option<usize>) {
+        let marker = markdown_image_ref(key);
+        let total_chars = note.chars().count();
+        let insert_chars = cursor_char_index.unwrap_or(total_chars).min(total_chars);
+        let byte_index = note
+            .char_indices()
+            .nth(insert_chars)
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| note.len());
+
+        let needs_prefix_newline = byte_index > 0 && !note[..byte_index].ends_with('\n');
+        let needs_suffix_newline = !note[byte_index..].starts_with('\n');
+
+        let mut snippet = String::new();
+        if needs_prefix_newline {
+            snippet.push('\n');
         }
-        if !note.trim_end().is_empty() {
-            note.push_str("\n\n");
+        snippet.push_str(&marker);
+        if needs_suffix_newline {
+            snippet.push('\n');
         }
-        note.push_str(SCREENSHOT_MARKDOWN_REF);
-        note.push('\n');
+
+        note.insert_str(byte_index, &snippet);
     }
 
-    fn remove_markdown_image_ref(note: &mut String) {
+    fn remove_markdown_image_ref(note: &mut String, key: &str) {
+        let marker = markdown_image_ref(key);
+        *note = note
+            .replace(&format!("\n\n{marker}\n"), "\n\n")
+            .replace(&format!("\n{marker}\n"), "\n")
+            .replace(&format!("\n{marker}"), "\n")
+            .replace(&marker, "");
+
+        // Backward compatibility: also strip legacy main marker if present.
         *note = note
             .replace(&format!("\n\n{SCREENSHOT_MARKDOWN_REF}\n"), "\n\n")
             .replace(&format!("\n{SCREENSHOT_MARKDOWN_REF}\n"), "\n")
@@ -1188,7 +1281,6 @@ impl App for LauncherApp {
         let mut activate = false;
         let mut selection_moved = false;
         let mut escape_action: Option<EscapeAction> = None;
-        let mut paste_from_clipboard = false;
 
         ctx.input(|input| {
             if input.key_pressed(Key::Escape) {
@@ -1214,10 +1306,6 @@ impl App for LauncherApp {
             }
             if !self.editor_open && input.key_pressed(Key::Enter) {
                 activate = true;
-            }
-
-            if self.editor_open && Self::paste_shortcut_pressed(input) {
-                paste_from_clipboard = true;
             }
         });
 
@@ -1311,14 +1399,22 @@ impl App for LauncherApp {
                                         .color(egui::Color32::from_gray(95)),
                                     );
                                 } else {
-                                    let row_height = 60.0;
-                                    let viewport_height = row_height * 5.0;
+                                    let viewport_height =
+                                        LAUNCHER_RESULT_ROW_HEIGHT * LAUNCHER_MAX_VISIBLE_ROWS as f32;
                                     egui::ScrollArea::vertical()
                                         .max_height(viewport_height)
                                         .show(ui, |ui| {
                                             for (idx, item) in self.results.iter().enumerate() {
                                                 let is_sel = idx == self.selected;
+                                                let bg = if is_sel {
+                                                    egui::Color32::from_rgb(230, 236, 245)
+                                                } else {
+                                                    egui::Color32::TRANSPARENT
+                                                };
+
                                                 egui::Frame::none()
+                                                    .fill(bg)
+                                                    .rounding(egui::Rounding::same(10.0))
                                                     .inner_margin(egui::Margin::symmetric(10.0, 7.0))
                                                     .show(ui, |ui| {
                                                         let resp = ui.add(
@@ -1334,6 +1430,7 @@ impl App for LauncherApp {
                                                             )
                                                             .sense(egui::Sense::click()),
                                                         );
+
                                                         if !item.subtitle.is_empty() {
                                                             ui.label(
                                                                 egui::RichText::new(&item.subtitle)
@@ -1380,6 +1477,7 @@ impl App for LauncherApp {
                 });
             });
 
+        self.sync_launcher_size(ctx);
         self.render_editor_modal(ctx);
 
         if let Some(action) = escape_action {
@@ -1388,10 +1486,6 @@ impl App for LauncherApp {
                 EscapeAction::HideLauncher => self.hide_launcher(ctx),
                 EscapeAction::CloseApp => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             }
-        }
-
-        if paste_from_clipboard {
-            self.try_paste_clipboard_image();
         }
 
         self.dispatch_due_search(ctx);
@@ -1450,22 +1544,6 @@ fn append_job(job: &mut LayoutJob, text: &str, size: f32, color: Color32, highli
         format.background = Color32::from_rgb(255, 238, 170);
     }
     job.append(text, 0.0, format);
-}
-
-fn capture_screenshot_bytes() -> Result<Option<Vec<u8>>, String> {
-    let path = std::env::temp_dir().join(format!("alfred-alt-shot-{}.png", unix_time_secs()));
-    match Command::new("screencapture").arg("-i").arg(&path).status() {
-        Ok(status) if status.success() && path.exists() => {
-            let read_result = std::fs::read(&path);
-            let _ = std::fs::remove_file(&path);
-            match read_result {
-                Ok(bytes) => normalize_screenshot_for_storage(&bytes).map(Some),
-                Err(err) => Err(format!("Could not read screenshot: {err}")),
-            }
-        }
-        Ok(_) => Ok(None),
-        Err(err) => Err(format!("screencapture failed: {err}")),
-    }
 }
 
 fn decode_screenshot_bytes(bytes: &[u8]) -> Result<DecodedImage, String> {
