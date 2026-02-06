@@ -7,13 +7,15 @@ use std::{
     collections::HashSet,
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
+    io::Cursor,
 };
 
 use arboard::Clipboard;
 use eframe::{App, egui};
 use egui::{Color32, Key, TextEdit, text::LayoutJob, text::TextFormat};
 use image::{
-    ColorType, ImageBuffer, ImageEncoder, Rgba, RgbaImage,
+    ColorType, ImageBuffer, ImageEncoder, ImageFormat, ImageReader, Rgba, RgbaImage,
+    codecs::jpeg::JpegEncoder,
     codecs::png::{CompressionType, FilterType, PngEncoder},
     imageops::FilterType as ResizeFilterType,
 };
@@ -46,8 +48,13 @@ const INLINE_IMAGE_DEFAULT_WIDTH: f32 = 360.0;
 const INLINE_IMAGE_MIN_WIDTH: f32 = 140.0;
 const INLINE_IMAGE_MAX_WIDTH: f32 = 1200.0;
 const INLINE_IMAGE_RESIZE_STEP: f32 = 80.0;
-const INLINE_IMAGE_MAX_HEIGHT: f32 = 120.0;
+const INLINE_IMAGE_MAX_HEIGHT: f32 = 240.0;
 const INLINE_IMAGE_ROW_HEIGHT: f32 = INLINE_IMAGE_MAX_HEIGHT + INLINE_IMAGE_PADDING_Y * 2.0;
+const INLINE_IMAGE_RESIZE_HANDLE_SIZE: f32 = 14.0;
+const INLINE_IMAGE_RESIZE_HANDLE_INSET: f32 = 5.0;
+const PREVIEW_TEMP_DIR_NAME: &str = "alfred_alt_previews";
+const JPEG_QUALITY_ATTEMPTS: [u8; 4] = [92, 84, 76, 68];
+const STORAGE_ENCODE_ATTEMPTS: usize = 4;
 
 fn markdown_image_ref(key: &str, width: Option<f32>) -> String {
     let width_suffix = width
@@ -80,6 +87,21 @@ struct SearchResponse {
     result: anyhow::Result<Vec<SearchResult>>,
 }
 
+struct ImagePasteTask {
+    seq: u64,
+    item_id: i64,
+    editor_session: u64,
+    cursor_char_index: Option<usize>,
+}
+
+struct ImagePasteResult {
+    seq: u64,
+    item_id: i64,
+    editor_session: u64,
+    cursor_char_index: Option<usize>,
+    result: Result<Vec<u8>, String>,
+}
+
 struct DecodedImage {
     size: [usize; 2],
     rgba: Vec<u8>,
@@ -99,6 +121,12 @@ struct InlineImageMarker {
     start_byte: usize,
     end_byte: usize,
     requested_width: Option<f32>,
+}
+
+#[derive(Clone)]
+struct ImageResizeDragState {
+    key: String,
+    start_width: f32,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -139,6 +167,7 @@ pub struct LauncherApp {
     launcher_hidden_for_editor: bool,
     editor_open: bool,
     editor_item: Option<EditableItem>,
+    editor_session: u64,
     editor_text_id: Option<egui::Id>,
     editor_needs_focus: bool,
     editor_dirty: bool,
@@ -151,12 +180,17 @@ pub struct LauncherApp {
     editor_cursor_char_index: Option<usize>,
     inline_image_textures: HashMap<String, egui::TextureHandle>,
     inline_image_texture_viewport: Option<egui::ViewportId>,
+    image_resize_drag: Option<ImageResizeDragState>,
     next_image_seq: u64,
     hotkey_rx: std::sync::mpsc::Receiver<AppMessage>,
     hotkey_enabled: bool,
     _hotkey: Option<HotKeyRegistration>,
     editor_task_tx: Sender<EditorTask>,
     editor_task_rx: Receiver<EditorTaskResult>,
+    image_paste_tx: Sender<ImagePasteTask>,
+    image_paste_rx: Receiver<ImagePasteResult>,
+    pending_image_paste_jobs: HashSet<u64>,
+    next_image_paste_seq: u64,
     search_tx: Sender<SearchRequest>,
     search_rx: Receiver<SearchResponse>,
     pending_search_at: Option<Instant>,
@@ -172,6 +206,7 @@ impl LauncherApp {
         let start_visible = !hotkey_enabled;
         let (search_tx, search_rx) = Self::spawn_search_worker(ctx.clone());
         let (editor_task_tx, editor_task_rx) = Self::spawn_editor_worker(ctx.clone());
+        let (image_paste_tx, image_paste_rx) = Self::spawn_image_paste_worker(ctx.clone());
         let mut app = Self {
             query: String::new(),
             results: Vec::new(),
@@ -183,6 +218,7 @@ impl LauncherApp {
             launcher_hidden_for_editor: false,
             editor_open: false,
             editor_item: None,
+            editor_session: 0,
             editor_text_id: None,
             editor_needs_focus: false,
             editor_dirty: false,
@@ -195,12 +231,17 @@ impl LauncherApp {
             editor_cursor_char_index: None,
             inline_image_textures: HashMap::new(),
             inline_image_texture_viewport: None,
+            image_resize_drag: None,
             next_image_seq: 0,
             hotkey_rx,
             hotkey_enabled,
             _hotkey: hotkey,
             editor_task_tx,
             editor_task_rx,
+            image_paste_tx,
+            image_paste_rx,
+            pending_image_paste_jobs: HashSet::new(),
+            next_image_paste_seq: 0,
             search_tx,
             search_rx,
             pending_search_at: None,
@@ -276,6 +317,29 @@ impl LauncherApp {
         });
 
         (request_tx, response_rx)
+    }
+
+    fn spawn_image_paste_worker(
+        ctx: egui::Context,
+    ) -> (Sender<ImagePasteTask>, Receiver<ImagePasteResult>) {
+        let (task_tx, task_rx) = mpsc::channel::<ImagePasteTask>();
+        let (result_tx, result_rx) = mpsc::channel::<ImagePasteResult>();
+        std::thread::spawn(move || {
+            while let Ok(task) = task_rx.recv() {
+                let result = LauncherApp::read_clipboard_image_for_storage();
+
+                let _ = result_tx.send(ImagePasteResult {
+                    seq: task.seq,
+                    item_id: task.item_id,
+                    editor_session: task.editor_session,
+                    cursor_char_index: task.cursor_char_index,
+                    result,
+                });
+                ctx.request_repaint();
+            }
+        });
+
+        (task_tx, result_rx)
     }
 
     fn process_app_messages(&mut self, ctx: &egui::Context) {
@@ -448,6 +512,7 @@ impl LauncherApp {
                 let images_hash = Self::images_hash(&item.images);
                 let initial_hash = Self::editor_content_hash(&item.note, images_hash);
                 let selected_image_key = item.images.first().map(|img| img.image_key.clone());
+                self.editor_session = self.editor_session.wrapping_add(1);
                 self.editor_item = Some(item);
                 self.editor_open = true;
                 self.launcher_hidden_for_editor = self.visible;
@@ -465,7 +530,9 @@ impl LauncherApp {
                 self.editor_cursor_char_index = None;
                 self.inline_image_textures.clear();
                 self.inline_image_texture_viewport = None;
+                self.image_resize_drag = None;
                 self.next_image_seq = 0;
+                self.pending_image_paste_jobs.clear();
                 self.editor_text_id = None;
                 ctx.request_repaint();
             }
@@ -510,71 +577,21 @@ impl LauncherApp {
     }
 
     fn try_paste_clipboard_image(&mut self) {
-        let mut clipboard = match Clipboard::new() {
-            Ok(clipboard) => clipboard,
-            Err(err) => {
-                self.last_error = Some(format!("Clipboard unavailable: {err}"));
-                return;
-            }
+        let Some((item_id, editor_session)) = self
+            .editor_item
+            .as_ref()
+            .map(|item| (item.id, self.editor_session))
+        else {
+            return;
         };
-
-        let mut paste_error: Option<String> = None;
-
-        match clipboard.get_image() {
-            Ok(image) => {
-                let rgba = match Self::clipboard_image_to_rgba(image) {
-                    Ok(rgba) => rgba,
-                    Err(err) => {
-                        self.last_error =
-                            Some(format!("Clipboard image format not supported: {err}"));
-                        return;
-                    }
-                };
-
-                match normalize_rgba_for_storage(rgba) {
-                    Ok(stored_bytes) => {
-                        self.add_image_to_editor(
-                            stored_bytes,
-                            "pasted",
-                            self.editor_cursor_char_index,
-                        );
-                        self.last_error = None;
-                        return;
-                    }
-                    Err(err) => {
-                        self.last_error = Some(format!("Could not use pasted image: {err}"));
-                        return;
-                    }
-                }
+        let cursor_char_index = self.editor_cursor_char_index;
+        match self.queue_image_paste_task(item_id, editor_session, cursor_char_index) {
+            Ok(()) => {
+                self.last_error = None;
             }
-            Err(arboard::Error::ContentNotAvailable) => {}
             Err(err) => {
-                paste_error = Some(format!("Could not read clipboard image: {err}"));
+                self.last_error = Some(err);
             }
-        }
-
-        match Self::read_macos_clipboard_image() {
-            Ok(Some(bytes)) => match normalize_screenshot_for_storage(&bytes) {
-                Ok(stored_bytes) => {
-                    self.add_image_to_editor(stored_bytes, "pasted", self.editor_cursor_char_index);
-                    self.last_error = None;
-                    return;
-                }
-                Err(err) => {
-                    self.last_error = Some(format!("Could not use pasted image: {err}"));
-                    return;
-                }
-            },
-            Ok(None) => {}
-            Err(err) => {
-                if paste_error.is_none() {
-                    paste_error = Some(err);
-                }
-            }
-        }
-
-        if let Some(err) = paste_error {
-            self.last_error = Some(err);
         }
     }
 
@@ -582,6 +599,7 @@ impl LauncherApp {
         self.queue_editor_save();
         self.editor_open = false;
         self.editor_item = None;
+        self.editor_session = self.editor_session.wrapping_add(1);
         self.editor_text_id = None;
         self.editor_needs_focus = false;
         self.editor_dirty = false;
@@ -594,6 +612,8 @@ impl LauncherApp {
         self.editor_cursor_char_index = None;
         self.inline_image_textures.clear();
         self.inline_image_texture_viewport = None;
+        self.image_resize_drag = None;
+        self.pending_image_paste_jobs.clear();
         self.next_image_seq = 0;
         if self.launcher_hidden_for_editor {
             self.launcher_hidden_for_editor = false;
@@ -631,6 +651,7 @@ impl LauncherApp {
             if item.images.len() != before {
                 Self::remove_markdown_image_ref(&mut item.note, &selected);
                 self.selected_image_key = item.images.first().map(|img| img.image_key.clone());
+                self.image_resize_drag = None;
                 self.mark_screenshot_changed();
             }
         }
@@ -646,8 +667,91 @@ impl LauncherApp {
         };
         if let Some(item) = self.editor_item.as_mut() {
             if Self::update_markdown_image_ref_width(&mut item.note, &selected, delta) {
-                self.mark_screenshot_changed();
+                self.mark_editor_dirty();
             }
+        }
+    }
+
+    fn set_image_width(&mut self, key: &str, width: f32) {
+        let mut changed = false;
+        if let Some(item) = self.editor_item.as_mut() {
+            changed = Self::set_markdown_image_ref_width(&mut item.note, key, width);
+        }
+        if changed {
+            self.mark_editor_dirty();
+        }
+    }
+
+    fn open_image_preview_by_key(&mut self, key: &str) {
+        let Some((item_id, bytes)) = self.editor_item.as_ref().and_then(|item| {
+            item.images
+                .iter()
+                .find(|img| img.image_key == key)
+                .or_else(|| {
+                    if key == "main" {
+                        item.images.first()
+                    } else {
+                        None
+                    }
+                })
+                .map(|img| (item.id, img.bytes.clone()))
+        }) else {
+            return;
+        };
+
+        match Self::write_preview_image_file(item_id, key, &bytes)
+            .and_then(|path| Self::open_image_preview_file(&path))
+        {
+            Ok(()) => {
+                self.last_error = None;
+            }
+            Err(err) => {
+                self.last_error = Some(err);
+            }
+        }
+    }
+
+    fn write_preview_image_file(
+        item_id: i64,
+        key: &str,
+        bytes: &[u8],
+    ) -> Result<std::path::PathBuf, String> {
+        let preview_dir = std::env::temp_dir().join(PREVIEW_TEMP_DIR_NAME);
+        std::fs::create_dir_all(&preview_dir)
+            .map_err(|err| format!("Could not create preview temp folder: {err}"))?;
+
+        let sanitized_key: String = key
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let file_name = format!("item-{item_id}-{sanitized_key}.png");
+        let path = preview_dir.join(file_name);
+        std::fs::write(&path, bytes)
+            .map_err(|err| format!("Could not write preview image file: {err}"))?;
+        Ok(path)
+    }
+
+    fn open_image_preview_file(path: &std::path::Path) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("open")
+                .args(["-a", "Preview"])
+                .arg(path)
+                .spawn()
+                .map_err(|err| format!("Could not open image preview: {err}"))?;
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = path;
+            Err("Image preview on click is currently supported on macOS only.".to_string())
         }
     }
 
@@ -703,6 +807,57 @@ impl LauncherApp {
         }
     }
 
+    fn apply_image_paste_results(&mut self) {
+        loop {
+            match self.image_paste_rx.try_recv() {
+                Ok(msg) => {
+                    self.pending_image_paste_jobs.remove(&msg.seq);
+                    let active_editor_matches = self
+                        .editor_item
+                        .as_ref()
+                        .map(|item| {
+                            item.id == msg.item_id && self.editor_session == msg.editor_session
+                        })
+                        .unwrap_or(false);
+                    if !active_editor_matches {
+                        continue;
+                    }
+
+                    match msg.result {
+                        Ok(bytes) => {
+                            self.add_image_to_editor(bytes, "pasted", msg.cursor_char_index);
+                            self.last_error = None;
+                        }
+                        Err(err) => {
+                            self.last_error = Some(format!("Could not use pasted image: {err}"));
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn queue_image_paste_task(
+        &mut self,
+        item_id: i64,
+        editor_session: u64,
+        cursor_char_index: Option<usize>,
+    ) -> Result<(), String> {
+        self.next_image_paste_seq = self.next_image_paste_seq.wrapping_add(1);
+        let seq = self.next_image_paste_seq;
+        self.image_paste_tx
+            .send(ImagePasteTask {
+                seq,
+                item_id,
+                editor_session,
+                cursor_char_index,
+            })
+            .map_err(|err| format!("Failed to queue pasted image: {err}"))?;
+        self.pending_image_paste_jobs.insert(seq);
+        Ok(())
+    }
+
     fn editor_content_hash(note: &str, images_hash: u64) -> u64 {
         let mut hasher = DefaultHasher::new();
         note.hash(&mut hasher);
@@ -742,6 +897,7 @@ impl LauncherApp {
             });
             Self::insert_markdown_image_ref(&mut item.note, &key, cursor_char_index);
             self.selected_image_key = Some(key);
+            self.image_resize_drag = None;
             self.mark_screenshot_changed();
         }
     }
@@ -817,6 +973,12 @@ impl LauncherApp {
             .into_iter()
             .find(|marker| marker.start_char <= char_index && char_index <= marker.end_char)
             .map(|marker| marker.key)
+    }
+
+    fn is_char_on_image_line(note: &str, char_index: usize) -> bool {
+        Self::inline_image_markers(note)
+            .into_iter()
+            .any(|marker| marker.start_char <= char_index && char_index <= marker.end_char)
     }
 
     fn reconcile_note_image_references(
@@ -1034,11 +1196,73 @@ impl LauncherApp {
                 output.galley_pos.y + row_rect.top() + INLINE_IMAGE_PADDING_Y,
             );
             let image_rect = egui::Rect::from_min_size(top_left, draw_size);
+            let is_selected = self.selected_image_key.as_deref() == Some(marker.key.as_str());
+            let mut handle_hovered = false;
+            let mut handle_used = false;
+            let mut handle_rect_and_color: Option<(egui::Rect, Color32)> = None;
+
+            if is_selected {
+                let handle_center = image_rect.right_bottom()
+                    - egui::vec2(
+                        INLINE_IMAGE_RESIZE_HANDLE_INSET,
+                        INLINE_IMAGE_RESIZE_HANDLE_INSET,
+                    );
+                let handle_rect = egui::Rect::from_center_size(
+                    handle_center,
+                    egui::vec2(
+                        INLINE_IMAGE_RESIZE_HANDLE_SIZE,
+                        INLINE_IMAGE_RESIZE_HANDLE_SIZE,
+                    ),
+                );
+                let handle_id = ui.make_persistent_id((
+                    "inline-image-resize-handle",
+                    marker.key.as_str(),
+                    marker.start_byte,
+                ));
+                let handle_response = ui
+                    .interact(handle_rect, handle_id, egui::Sense::click_and_drag())
+                    .on_hover_cursor(egui::CursorIcon::ResizeNwSe);
+
+                if handle_response.drag_started() {
+                    self.image_resize_drag = Some(ImageResizeDragState {
+                        key: marker.key.clone(),
+                        start_width: draw_size.x,
+                    });
+                }
+                if handle_response.dragged() {
+                    if let Some(state) = self.image_resize_drag.clone() {
+                        if state.key == marker.key {
+                            let next_width = (state.start_width + handle_response.drag_delta().x)
+                                .clamp(INLINE_IMAGE_MIN_WIDTH, INLINE_IMAGE_MAX_WIDTH);
+                            self.set_image_width(&marker.key, next_width);
+                        }
+                    }
+                }
+                if handle_response.drag_stopped() {
+                    self.image_resize_drag = None;
+                }
+
+                handle_hovered = handle_response.hovered();
+                handle_used = handle_response.drag_started()
+                    || handle_response.dragged()
+                    || handle_response.drag_stopped();
+                let handle_color = if handle_response.dragged() {
+                    Color32::from_rgb(60, 120, 190)
+                } else if handle_response.hovered() {
+                    Color32::from_rgb(75, 135, 205)
+                } else {
+                    Color32::from_rgb(90, 145, 210)
+                };
+                handle_rect_and_color = Some((handle_rect, handle_color));
+            }
+
             let image_id =
                 ui.make_persistent_id(("inline-image", marker.key.as_str(), marker.start_byte));
             let image_response = ui.interact(image_rect, image_id, egui::Sense::click());
-            if image_response.clicked() {
+            if image_response.clicked() && !handle_hovered && !handle_used {
                 self.selected_image_key = Some(marker.key.clone());
+                self.image_resize_drag = None;
+                self.open_image_preview_by_key(&marker.key);
             }
 
             painter.image(
@@ -1048,14 +1272,75 @@ impl LauncherApp {
                 Color32::WHITE,
             );
 
-            if self.selected_image_key.as_deref() == Some(marker.key.as_str()) {
+            if is_selected {
                 painter.rect_stroke(
                     image_rect.expand(1.5),
                     3.0,
                     egui::Stroke::new(1.5, Color32::from_rgb(80, 145, 214)),
                 );
+
+                let Some((handle_rect, handle_color)) = handle_rect_and_color else {
+                    continue;
+                };
+                painter.rect_filled(
+                    handle_rect,
+                    2.0,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 230),
+                );
+                painter.rect_stroke(handle_rect, 2.0, egui::Stroke::new(1.0, handle_color));
+
+                let slash_pad = 3.0;
+                let slash_start = egui::pos2(
+                    handle_rect.left() + slash_pad,
+                    handle_rect.bottom() - slash_pad,
+                );
+                let slash_end = egui::pos2(
+                    handle_rect.right() - slash_pad,
+                    handle_rect.top() + slash_pad,
+                );
+                painter.line_segment(
+                    [slash_start, slash_end],
+                    egui::Stroke::new(1.0, handle_color),
+                );
             }
         }
+    }
+
+    fn paint_hidden_cursor_on_image_line(
+        &self,
+        ui: &egui::Ui,
+        output: &egui::text_edit::TextEditOutput,
+        note: &str,
+    ) {
+        if !output.response.has_focus() {
+            return;
+        }
+        let Some(cursor_range) = output.cursor_range else {
+            return;
+        };
+        if !cursor_range.is_empty() {
+            return;
+        }
+
+        let cursor_char_index = cursor_range.primary.ccursor.index.min(note.chars().count());
+        if !Self::is_char_on_image_line(note, cursor_char_index) {
+            return;
+        }
+
+        let mut cursor_rect = output
+            .galley
+            .pos_from_cursor(&cursor_range.primary)
+            .translate(output.galley_pos.to_vec2());
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        cursor_rect.max.y = cursor_rect.max.y.max(cursor_rect.min.y + row_height);
+        cursor_rect = cursor_rect.expand(2.0).intersect(output.text_clip_rect);
+        if !cursor_rect.is_positive() {
+            return;
+        }
+
+        ui.painter()
+            .with_clip_rect(output.text_clip_rect)
+            .rect_filled(cursor_rect, 1.0, ui.visuals().extreme_bg_color);
     }
 
     fn editor_viewport_id() -> egui::ViewportId {
@@ -1119,7 +1404,7 @@ impl LauncherApp {
     fn render_editor_contents(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) -> EditorActions {
         let mut note_changed = false;
         let mut image_state_changed = false;
-        let mut actions = EditorActions::default();
+        let actions = EditorActions::default();
         let is_dirty = self.editor_dirty;
         let mut inline_output: Option<egui::text_edit::TextEditOutput> = None;
         let mut note_for_inline: Option<String> = None;
@@ -1138,36 +1423,23 @@ impl LauncherApp {
             ui.add_space(4.0);
 
             ui.horizontal_wrapped(|ui| {
-                if !item.images.is_empty() {
-                    if ui.button("Remove Image").clicked() {
-                        actions.remove_image = true;
-                    }
-
-                    let can_resize = self
-                        .selected_image_key
-                        .as_ref()
-                        .map(|selected| item.images.iter().any(|img| &img.image_key == selected))
-                        .unwrap_or(false);
-                    if ui
-                        .add_enabled(can_resize, egui::Button::new("Image -"))
-                        .clicked()
-                    {
-                        actions.shrink_image = true;
-                    }
-                    if ui
-                        .add_enabled(can_resize, egui::Button::new("Image +"))
-                        .clicked()
-                    {
-                        actions.grow_image = true;
-                    }
-                }
                 ui.label(
                     egui::RichText::new(
-                        "Paste with Cmd/Ctrl+V. Click an image to select, then use Image +/- to resize.",
+                        "Paste with Cmd/Ctrl+V. Click an image to open Preview, and drag its bottom-right corner to resize.",
                     )
                     .size(11.0)
                     .color(egui::Color32::from_gray(90)),
                 );
+                if !self.pending_image_paste_jobs.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(11.0));
+                        ui.label(
+                            egui::RichText::new("Processing pasted image...")
+                                .size(11.0)
+                                .color(egui::Color32::from_gray(90)),
+                        );
+                    });
+                }
             });
             ui.add_space(6.0);
 
@@ -1182,13 +1454,21 @@ impl LauncherApp {
                 let mut layouter = |ui: &egui::Ui, text: &str, wrap_width: f32| {
                     Self::layout_editor_note(ui, text, wrap_width)
                 };
-                let output = TextEdit::multiline(&mut item.note)
-                    .id_source(editor_id)
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(desired_rows)
-                    .font(egui::TextStyle::Body)
-                    .layouter(&mut layouter)
-                    .show(ui);
+                let output = egui::ScrollArea::vertical()
+                    .id_source(("note_editor_modal_scroll", editor_id))
+                    .auto_shrink([false, false])
+                    .max_height(editor_height)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        TextEdit::multiline(&mut item.note)
+                            .id_source(editor_id)
+                            .desired_width(f32::INFINITY)
+                            .desired_rows(desired_rows)
+                            .font(egui::TextStyle::Body)
+                            .layouter(&mut layouter)
+                            .show(ui)
+                    })
+                    .inner;
 
                 if self.editor_needs_focus {
                     output.response.request_focus();
@@ -1219,6 +1499,7 @@ impl LauncherApp {
                     .unwrap_or(false)
                 {
                     self.selected_image_key = item.images.first().map(|img| img.image_key.clone());
+                    self.image_resize_drag = None;
                 }
 
                 note_for_inline = Some(item.note.clone());
@@ -1240,6 +1521,7 @@ impl LauncherApp {
         }
 
         if let (Some(output), Some(note)) = (inline_output.as_ref(), note_for_inline.as_deref()) {
+            self.paint_hidden_cursor_on_image_line(ui, output, note);
             self.paint_inline_images(ctx, ui, output, note);
         }
 
@@ -1360,6 +1642,9 @@ impl LauncherApp {
         if self.editor_dirty {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
+        if !self.pending_image_paste_jobs.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(90));
+        }
         if close_now || !self.editor_open {
             self.close_editor(ctx);
         }
@@ -1387,9 +1672,7 @@ impl LauncherApp {
                 if !output.status.success() || output.stdout.is_empty() {
                     continue;
                 }
-                if image::load_from_memory(&output.stdout).is_ok() {
-                    return Ok(Some(output.stdout));
-                }
+                return Ok(Some(output.stdout));
             }
             Ok(None)
         }
@@ -1400,11 +1683,34 @@ impl LauncherApp {
         }
     }
 
+    fn read_clipboard_image_for_storage() -> Result<Vec<u8>, String> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(bytes) = Self::read_macos_clipboard_image()? {
+                return normalize_screenshot_for_storage(&bytes);
+            }
+        }
+
+        let mut clipboard =
+            Clipboard::new().map_err(|err| format!("Clipboard unavailable: {err}"))?;
+        match clipboard.get_image() {
+            Ok(image) => {
+                Self::clipboard_image_to_rgba(image.width, image.height, image.bytes.into_owned())
+                    .map_err(|err| format!("Clipboard image format not supported: {err}"))
+                    .and_then(normalize_rgba_for_storage)
+            }
+            Err(arboard::Error::ContentNotAvailable) => {
+                Err("Clipboard does not contain an image.".to_string())
+            }
+            Err(err) => Err(format!("Could not read clipboard image: {err}")),
+        }
+    }
+
     fn clipboard_image_to_rgba(
-        image: arboard::ImageData<'_>,
+        width: usize,
+        height: usize,
+        bytes: Vec<u8>,
     ) -> Result<ImageBuffer<Rgba<u8>, Vec<u8>>, String> {
-        let width = image.width;
-        let height = image.height;
         let Some(pixel_count) = width.checked_mul(height) else {
             return Err("image dimensions are too large".to_string());
         };
@@ -1412,7 +1718,6 @@ impl LauncherApp {
             return Err("clipboard image is empty".to_string());
         }
 
-        let bytes = image.bytes.into_owned();
         let Some(expected_rgba_len) = pixel_count.checked_mul(4) else {
             return Err("image dimensions overflowed RGBA buffer size".to_string());
         };
@@ -1506,6 +1811,22 @@ impl LauncherApp {
             return false;
         }
 
+        let mut current_width = INLINE_IMAGE_DEFAULT_WIDTH;
+        for line in note.lines() {
+            if let Some(parsed) = Self::parse_markdown_image_line(line) {
+                if parsed.key == key {
+                    current_width = parsed.width.unwrap_or(INLINE_IMAGE_DEFAULT_WIDTH);
+                    break;
+                }
+            }
+        }
+        let next_width =
+            (current_width + delta).clamp(INLINE_IMAGE_MIN_WIDTH, INLINE_IMAGE_MAX_WIDTH);
+        Self::set_markdown_image_ref_width(note, key, next_width)
+    }
+
+    fn set_markdown_image_ref_width(note: &mut String, key: &str, width: f32) -> bool {
+        let normalized_width = width.clamp(INLINE_IMAGE_MIN_WIDTH, INLINE_IMAGE_MAX_WIDTH);
         let mut changed = false;
         let mut rebuilt = String::with_capacity(note.len());
         for line_with_break in note.split_inclusive('\n') {
@@ -1518,10 +1839,7 @@ impl LauncherApp {
 
             if let Some(parsed) = Self::parse_markdown_image_line(line) {
                 if parsed.key == key {
-                    let current_width = parsed.width.unwrap_or(INLINE_IMAGE_DEFAULT_WIDTH);
-                    let next_width = (current_width + delta)
-                        .clamp(INLINE_IMAGE_MIN_WIDTH, INLINE_IMAGE_MAX_WIDTH);
-                    let replacement = markdown_image_ref(&parsed.key, Some(next_width));
+                    let replacement = markdown_image_ref(&parsed.key, Some(normalized_width));
                     changed |= replacement != line;
                     rebuilt.push_str(&replacement);
                     if has_newline {
@@ -1590,6 +1908,7 @@ impl App for LauncherApp {
         self.process_app_messages(ctx);
         self.apply_theme(ctx);
         self.apply_editor_task_results();
+        self.apply_image_paste_results();
         self.apply_search_responses();
 
         let mut activate = false;
@@ -1887,17 +2206,38 @@ fn encode_png_with_compression(
     Ok(encoded)
 }
 
-fn encode_png_for_storage(rgba: &RgbaImage) -> Result<Vec<u8>, String> {
-    // Prioritize responsiveness: try fast compression first, then fall back to best
-    // only when needed to fit storage limits.
-    let fast = encode_png_with_compression(rgba, CompressionType::Fast)?;
-    if fast.len() <= MAX_SCREENSHOT_BYTES {
-        return Ok(fast);
-    }
+fn encode_png_for_storage(rgba: RgbaImage) -> Result<Vec<u8>, String> {
+    let mut current = rgba;
+    let allow_jpeg = !rgba_has_transparency(&current);
 
-    let best = encode_png_with_compression(rgba, CompressionType::Best)?;
-    if best.len() <= MAX_SCREENSHOT_BYTES {
-        return Ok(best);
+    for _ in 0..STORAGE_ENCODE_ATTEMPTS {
+        let png = encode_png_with_compression(&current, CompressionType::Fast)?;
+        if png.len() <= MAX_SCREENSHOT_BYTES {
+            return Ok(png);
+        }
+
+        if allow_jpeg {
+            let rgb = rgba_to_rgb_bytes(&current);
+            for quality in JPEG_QUALITY_ATTEMPTS {
+                let jpeg =
+                    encode_jpeg_with_quality(&rgb, current.width(), current.height(), quality)?;
+                if jpeg.len() <= MAX_SCREENSHOT_BYTES {
+                    return Ok(jpeg);
+                }
+            }
+        }
+
+        let scale =
+            ((MAX_SCREENSHOT_BYTES as f64 / png.len() as f64).sqrt() * 0.95).clamp(0.58, 0.9);
+        let next_width = ((current.width() as f64 * scale).round() as u32).max(1);
+        let next_height = ((current.height() as f64 * scale).round() as u32).max(1);
+        if next_width >= current.width() || next_height >= current.height() {
+            break;
+        }
+
+        current = image::DynamicImage::ImageRgba8(current)
+            .resize(next_width, next_height, ResizeFilterType::Triangle)
+            .to_rgba8();
     }
 
     Err(format!(
@@ -1928,7 +2268,7 @@ fn normalize_rgba_for_storage(rgba: RgbaImage) -> Result<Vec<u8>, String> {
             rgba
         };
 
-    encode_png_for_storage(&processed)
+    encode_png_for_storage(processed)
 }
 
 fn normalize_screenshot_for_storage(bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -1939,9 +2279,68 @@ fn normalize_screenshot_for_storage(bytes: &[u8]) -> Result<Vec<u8>, String> {
         ));
     }
 
+    if can_store_encoded_image_directly(bytes) {
+        return Ok(bytes.to_vec());
+    }
+
     let img = image::load_from_memory(bytes)
         .map_err(|err| format!("Could not decode screenshot image: {err}"))?;
     normalize_rgba_for_storage(img.to_rgba8())
+}
+
+fn encode_jpeg_with_quality(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    quality: u8,
+) -> Result<Vec<u8>, String> {
+    let mut encoded = Vec::new();
+    let encoder = JpegEncoder::new_with_quality(&mut encoded, quality);
+    encoder
+        .write_image(rgb, width, height, ColorType::Rgb8.into())
+        .map_err(|err| format!("Could not encode screenshot: {err}"))?;
+    Ok(encoded)
+}
+
+fn rgba_has_transparency(rgba: &RgbaImage) -> bool {
+    rgba.as_raw().chunks_exact(4).any(|pixel| pixel[3] != 255)
+}
+
+fn rgba_to_rgb_bytes(rgba: &RgbaImage) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity(rgba.width() as usize * rgba.height() as usize * 3);
+    for pixel in rgba.as_raw().chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+    rgb
+}
+
+fn can_store_encoded_image_directly(bytes: &[u8]) -> bool {
+    if bytes.len() > MAX_SCREENSHOT_BYTES {
+        return false;
+    }
+
+    let format = match image::guess_format(bytes) {
+        Ok(format) => format,
+        Err(_) => return false,
+    };
+    if format != ImageFormat::Png && format != ImageFormat::Jpeg {
+        return false;
+    }
+
+    let reader = match ImageReader::new(Cursor::new(bytes)).with_guessed_format() {
+        Ok(reader) => reader,
+        Err(_) => return false,
+    };
+    let (width, height) = match reader.into_dimensions() {
+        Ok(dimensions) => dimensions,
+        Err(_) => return false,
+    };
+
+    width > 0
+        && height > 0
+        && width <= SCREENSHOT_MAX_DIMENSION_WIDTH
+        && height <= SCREENSHOT_MAX_DIMENSION_HEIGHT
+        && (width as u64 * height as u64) <= SCREENSHOT_MAX_PIXELS
 }
 
 fn unix_time_secs() -> u64 {
