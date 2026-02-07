@@ -405,16 +405,8 @@ private struct EditorSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(viewModel.selectedItem?.title ?? "Editor")
-                    .font(.system(size: 20, weight: .semibold))
-
-                Spacer()
-
-                Button("Paste Image") {
-                    Task { await viewModel.pasteImageFromClipboard(at: editorCursorCharIndex) }
-                }
-            }
+            Text(viewModel.selectedItem?.title ?? "Editor")
+                .font(.system(size: 20, weight: .semibold))
 
             InlineImageTextEditor(
                 text: $viewModel.editorText,
