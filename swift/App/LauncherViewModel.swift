@@ -67,6 +67,43 @@ final class LauncherViewModel: ObservableObject {
         editorWindow?.makeKeyAndOrderFront(nil)
     }
 
+    func dismissLauncher() {
+        guard !isEditorPresented, let launcherWindow else {
+            return
+        }
+
+        launcherWindow.orderOut(nil)
+        NSApp.hide(nil)
+    }
+
+    func revealLauncherIfNeeded() {
+        guard !isEditorPresented, let launcherWindow else {
+            return
+        }
+
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if launcherWindow.isMiniaturized {
+            launcherWindow.deminiaturize(nil)
+        }
+        launcherWindow.makeKeyAndOrderFront(nil)
+        launcherWindow.orderFrontRegardless()
+        launcherFocusRequestID &+= 1
+    }
+
+    func toggleLauncherVisibilityFromHotKey() {
+        guard !isEditorPresented, let launcherWindow else {
+            return
+        }
+
+        let isEffectivelyVisible = launcherWindow.isVisible && !launcherWindow.isMiniaturized && !NSApp.isHidden
+        if isEffectivelyVisible {
+            dismissLauncher()
+        } else {
+            revealLauncherIfNeeded()
+        }
+    }
+
     func editorDidClose() {
         guard isEditorPresented else {
             return

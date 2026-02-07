@@ -243,7 +243,7 @@ struct ContentView: View {
             activateCurrentSelection()
             return true
         case 53: // escape
-            NSApp.hide(nil)
+            viewModel.dismissLauncher()
             return true
         default:
             return false
