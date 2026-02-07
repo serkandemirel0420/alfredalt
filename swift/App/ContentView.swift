@@ -81,7 +81,7 @@ struct ContentView: View {
             guard oldValue != newValue, let proxy = resultsScrollProxy else {
                 return
             }
-            scrollSelectionIntoView(using: proxy, animated: true)
+            scrollSelectionIntoView(using: proxy, animated: false)
         }
         .onChange(of: viewModel.launcherFocusRequestID) { _, _ in
             searchFieldFocused = true
@@ -137,12 +137,9 @@ struct ContentView: View {
                                         ResultRow(
                                             item: item,
                                             isSelected: isSelected,
-                                            onHover: {
-                                                selectedIndex = idx
-                                            },
                                             onActivate: {
                                                 selectedIndex = idx
-                                                activateCurrentSelection()
+                                                activateResult(at: idx)
                                             }
                                         )
                                         .equatable()
@@ -188,8 +185,12 @@ struct ContentView: View {
     }
 
     private func activateCurrentSelection() {
+        activateResult(at: selectedIndex)
+    }
+
+    private func activateResult(at index: Int) {
         Task {
-            let openedEditor = await viewModel.activate(selectedIndex: selectedIndex)
+            let openedEditor = await viewModel.activate(selectedIndex: index)
             if openedEditor {
                 viewModel.beginEditorPresentation()
                 openWindow(id: "editor")
@@ -227,11 +228,13 @@ struct ContentView: View {
             if selectedIndex > 0 {
                 selectedIndex -= 1
             }
+            searchFieldFocused = true
             return true
         case 125: // down
             if selectedIndex + 1 < viewModel.results.count {
                 selectedIndex += 1
             }
+            searchFieldFocused = true
             return true
         case 36, 76: // return / enter
             activateCurrentSelection()
@@ -305,7 +308,6 @@ private struct WindowAccessor: NSViewRepresentable {
 private struct ResultRow: View, Equatable {
     let item: SearchResultRecord
     let isSelected: Bool
-    let onHover: () -> Void
     let onActivate: () -> Void
 
     static func == (lhs: ResultRow, rhs: ResultRow) -> Bool {
@@ -334,11 +336,6 @@ private struct ResultRow: View, Equatable {
             .background(isSelected ? Color(red: 230 / 255, green: 236 / 255, blue: 245 / 255) : Color.clear)
         }
         .buttonStyle(.plain)
-        .onHover { hovering in
-            if hovering {
-                onHover()
-            }
-        }
     }
 
     private func attributedSnippet(_ snippet: String) -> AttributedString {
