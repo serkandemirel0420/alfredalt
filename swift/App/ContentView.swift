@@ -5,6 +5,10 @@ private let launcherWindowWidth: CGFloat = 1040
 private let launcherEmptyHeight: CGFloat = 96
 private let launcherResultRowHeight: CGFloat = 60
 private let launcherMaxVisibleRows: CGFloat = 5
+private let launcherShellCornerRadius: CGFloat = 24
+private let launcherSearchFieldCornerRadius: CGFloat = 12
+private let launcherShellPadding: CGFloat = 14
+private let launcherResultsCornerRadius: CGFloat = launcherShellCornerRadius - launcherShellPadding
 private let keyHandlingModifierMask: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
 
 private struct LauncherShellHeightPreferenceKey: PreferenceKey {
@@ -102,7 +106,7 @@ struct ContentView: View {
             .padding(.vertical, 10)
             .background(Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255, opacity: 252 / 255))
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: launcherSearchFieldCornerRadius, style: .continuous)
                     .stroke(
                         viewModel.isSearching
                             ? Color(red: 70 / 255, green: 130 / 255, blue: 210 / 255, opacity: 0.75)
@@ -110,17 +114,7 @@ struct ContentView: View {
                         lineWidth: 1.5
                     )
             )
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .offset(y: viewModel.isSearching ? -4 : 0)
-            .scaleEffect(viewModel.isSearching ? 1.01 : 1)
-            .shadow(
-                color: viewModel.isSearching
-                    ? Color(red: 70 / 255, green: 130 / 255, blue: 210 / 255, opacity: 0.32)
-                    : .clear,
-                radius: viewModel.isSearching ? 10 : 0,
-                x: 0,
-                y: viewModel.isSearching ? 6 : 0
-            )
+            .clipShape(RoundedRectangle(cornerRadius: launcherSearchFieldCornerRadius, style: .continuous))
             .animation(.spring(response: 0.28, dampingFraction: 0.78), value: viewModel.isSearching)
 
             if let errorMessage = viewModel.errorMessage {
@@ -179,18 +173,17 @@ struct ContentView: View {
                 .id("launcher-results-state")
                 .padding(.top, 8)
                 .frame(maxWidth: .infinity, minHeight: resultsViewportHeight, maxHeight: resultsViewportHeight, alignment: .top)
-                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: launcherResultsCornerRadius, style: .continuous))
             }
         }
-        .padding(14)
+        .padding(launcherShellPadding)
         .frame(width: width)
-        .background(Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255, opacity: 252 / 255))
+        .background(Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255))
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
+            RoundedRectangle(cornerRadius: launcherShellCornerRadius, style: .continuous)
                 .stroke(Color.black.opacity(35 / 255), lineWidth: 1)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .shadow(color: Color.black.opacity(52 / 255), radius: 14, x: 0, y: 6)
+        .clipShape(RoundedRectangle(cornerRadius: launcherShellCornerRadius, style: .continuous))
     }
 
     private func activateCurrentSelection() {
@@ -345,7 +338,6 @@ private struct ResultRow: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(isSelected ? Color(red: 230 / 255, green: 236 / 255, blue: 245 / 255) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { hovering in
