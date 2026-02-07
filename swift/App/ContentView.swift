@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 private let launcherWindowWidth: CGFloat = 1040
-private let launcherEmptyHeight: CGFloat = 220
+private let launcherEmptyHeight: CGFloat = 96
 private let launcherResultRowHeight: CGFloat = 60
 private let launcherMaxVisibleRows: CGFloat = 5
 private let keyHandlingModifierMask: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
@@ -131,59 +131,56 @@ struct ContentView: View {
             }
 
             let isEmptyQuery = viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            Group {
-                if isEmptyQuery {
-                    Text("Alfred Update Available")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(Color(white: 20 / 255))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-                } else if viewModel.results.isEmpty {
-                    Text("No matching results. Press Enter to add this as a new entry.")
-                        .font(.system(size: 13))
-                        .italic()
-                        .foregroundStyle(Color(white: 95 / 255))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                } else {
-                    ScrollViewReader { proxy in
-                        ScrollView {
-                            LazyVStack(spacing: 0) {
-                                ForEach(Array(viewModel.results.enumerated()), id: \.element.id) { idx, item in
-                                    let isSelected = idx == selectedIndex
-                                    ResultRow(
-                                        item: item,
-                                        isSelected: isSelected,
-                                        onHover: {
-                                            selectedIndex = idx
-                                        },
-                                        onActivate: {
-                                            selectedIndex = idx
-                                            activateCurrentSelection()
-                                        }
-                                    )
-                                    .id(item.id)
+            if !isEmptyQuery {
+                Group {
+                    if viewModel.results.isEmpty {
+                        Text("No matching results. Press Enter to add this as a new entry.")
+                            .font(.system(size: 13))
+                            .italic()
+                            .foregroundStyle(Color(white: 95 / 255))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    } else {
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                LazyVStack(spacing: 0) {
+                                    ForEach(Array(viewModel.results.enumerated()), id: \.element.id) { idx, item in
+                                        let isSelected = idx == selectedIndex
+                                        ResultRow(
+                                            item: item,
+                                            isSelected: isSelected,
+                                            onHover: {
+                                                selectedIndex = idx
+                                            },
+                                            onActivate: {
+                                                selectedIndex = idx
+                                                activateCurrentSelection()
+                                            }
+                                        )
+                                        .id(item.id)
 
-                                    if idx + 1 < viewModel.results.count {
-                                        Divider()
+                                        if idx + 1 < viewModel.results.count {
+                                            Divider()
+                                        }
                                     }
                                 }
                             }
-                        }
-                        .onAppear {
-                            resultsScrollProxy = proxy
-                            scrollSelectionIntoView(using: proxy, animated: false)
-                        }
-                        .onDisappear {
-                            if resultsScrollProxy != nil {
-                                resultsScrollProxy = nil
+                            .onAppear {
+                                resultsScrollProxy = proxy
+                                scrollSelectionIntoView(using: proxy, animated: false)
+                            }
+                            .onDisappear {
+                                if resultsScrollProxy != nil {
+                                    resultsScrollProxy = nil
+                                }
                             }
                         }
                     }
                 }
+                .id("launcher-results-state")
+                .padding(.top, 8)
+                .frame(maxWidth: .infinity, minHeight: resultsViewportHeight, maxHeight: resultsViewportHeight, alignment: .top)
+                .clipped()
             }
-            .id(isEmptyQuery ? "launcher-empty-state" : "launcher-results-state")
-            .padding(.top, 8)
-            .frame(maxWidth: .infinity, minHeight: resultsViewportHeight, maxHeight: resultsViewportHeight, alignment: .top)
-            .clipped()
         }
         .padding(14)
         .frame(width: width)
@@ -246,7 +243,7 @@ struct ContentView: View {
             activateCurrentSelection()
             return true
         case 53: // escape
-            NSApp.terminate(nil)
+            NSApp.hide(nil)
             return true
         default:
             return false
