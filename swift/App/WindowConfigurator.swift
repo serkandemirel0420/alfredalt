@@ -29,21 +29,25 @@ struct WindowConfigurator: NSViewRepresentable {
     }
 
     private func configure(window: NSWindow, coordinator: Coordinator) {
-        let borderlessMask: NSWindow.StyleMask = [.borderless]
-
         if !coordinator.configured {
             coordinator.configured = true
             window.minSize = desiredSize
             window.maxSize = desiredSize
-            window.styleMask = borderlessMask
             window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
             window.isOpaque = false
             window.backgroundColor = .clear
             window.hasShadow = false
             window.level = .floating
             window.isMovable = false
             window.isMovableByWindowBackground = false
+            window.styleMask.insert(.fullSizeContentView)
+            window.styleMask.remove(.resizable)
             window.toolbar = nil
+
+            window.standardWindowButton(.closeButton)?.isHidden = true
+            window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+            window.standardWindowButton(.zoomButton)?.isHidden = true
 
             if let contentView = window.contentView {
                 contentView.wantsLayer = true
@@ -60,7 +64,6 @@ struct WindowConfigurator: NSViewRepresentable {
 
         window.minSize = desiredSize
         window.maxSize = desiredSize
-        window.styleMask = borderlessMask
         window.hasShadow = false
         window.isMovable = false
         window.isMovableByWindowBackground = false
