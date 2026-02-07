@@ -395,7 +395,6 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
         // First try FTS prefix match; then fallback to LIKE for substring hits.
         let mut results = Vec::with_capacity(limit.max(0) as usize);
         let mut seen_ids = HashSet::with_capacity(limit.max(0) as usize);
-        let query_lower = query.to_lowercase();
 
         if let Some(fts_query) = build_fts_query(query) {
             let mut stmt = conn.prepare_cached(
@@ -407,9 +406,7 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
              LIMIT ?2",
             )?;
             let rows = stmt
-                .query_map(params![fts_query, limit], |row| {
-                    map_search_row(row, query, &query_lower)
-                })?
+                .query_map(params![fts_query, limit], |row| map_search_row(row, query))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for row in rows {
                 if seen_ids.insert(row.id) {
@@ -429,9 +426,7 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
                LIMIT ?2"#,
             )?;
             let rows = stmt
-                .query_map(params![query, remaining], |row| {
-                    map_search_row(row, query, &query_lower)
-                })?
+                .query_map(params![query, remaining], |row| map_search_row(row, query))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for r in rows {
                 if seen_ids.insert(r.id) {
@@ -578,57 +573,65 @@ fn build_snippet(
     keywords: &str,
     note: &str,
     query: &str,
-    query_lower: &str,
 ) -> Option<(String, String)> {
-    if query.is_empty() {
+    let query_terms = parse_query_terms(query);
+    if query_terms.is_empty() {
         return None;
     }
-    let parts = [
-        ("title", title),
-        ("subtitle", subtitle),
-        ("keywords", keywords),
-        ("note", note),
-    ];
-    let needle = query_lower;
-    for (source, text) in parts {
-        if text.is_empty() {
-            continue;
-        }
-        let hay = text.to_lowercase();
-        if let Some(pos) = hay.find(&needle) {
-            let start = pos.saturating_sub(18);
-            let end = (pos + needle.len() + 18).min(text.len());
-            let mut snippet = text[start..end].to_string();
-            let rel_start = pos - start;
-            let rel_end = rel_start + needle.len();
-            if rel_end <= snippet.len() {
-                snippet.replace_range(
-                    rel_start..rel_end,
-                    &format!("**{}**", &text[pos..pos + needle.len()]),
-                );
-            }
-            if start > 0 {
-                snippet = format!("...{snippet}");
-            }
-            if end < text.len() {
-                snippet = format!("{snippet}...");
-            }
-            return Some((source.to_string(), snippet));
-        }
+
+    if let Some(snippet) = build_field_snippet("title", title, &query_terms, 32) {
+        return Some(snippet);
     }
-    None
+    if let Some(snippet) = build_field_snippet("subtitle", subtitle, &query_terms, 32) {
+        return Some(snippet);
+    }
+    if let Some(snippet) = build_field_snippet("keywords", keywords, &query_terms, 32) {
+        return Some(snippet);
+    }
+
+    build_field_snippet("note", note, &query_terms, 24)
 }
 
-fn map_search_row(
-    row: &rusqlite::Row<'_>,
-    query: &str,
-    query_lower: &str,
-) -> rusqlite::Result<SearchResult> {
+fn build_field_snippet(
+    source: &str,
+    text: &str,
+    query_terms: &[String],
+    context_chars: usize,
+) -> Option<(String, String)> {
+    if text.is_empty() {
+        return None;
+    }
+
+    let hay_lower = text.to_lowercase();
+    let (match_start, match_len) = first_match_position(&hay_lower, query_terms)?;
+    let raw_start = match_start.saturating_sub(context_chars);
+    let raw_end = match_start
+        .saturating_add(match_len)
+        .saturating_add(context_chars)
+        .min(text.len());
+    let start = previous_char_boundary(text, raw_start);
+    let end = next_char_boundary(text, raw_end);
+    if start >= end {
+        return None;
+    }
+
+    let mut snippet = highlight_query_terms(&text[start..end], query_terms);
+    if start > 0 {
+        snippet = format!("...{snippet}");
+    }
+    if end < text.len() {
+        snippet = format!("{snippet}...");
+    }
+
+    Some((source.to_string(), snippet))
+}
+
+fn map_search_row(row: &rusqlite::Row<'_>, query: &str) -> rusqlite::Result<SearchResult> {
     let title: String = row.get(1)?;
     let subtitle: String = row.get(2)?;
     let note: String = row.get(3)?;
     let keywords: String = row.get(4)?;
-    let snippet_data = build_snippet(&title, &subtitle, &keywords, &note, query, query_lower);
+    let snippet_data = build_snippet(&title, &subtitle, &keywords, &note, query);
 
     Ok(SearchResult {
         id: row.get(0)?,
@@ -637,6 +640,111 @@ fn map_search_row(
         snippet: snippet_data.as_ref().map(|(_, text)| text.clone()),
         snippet_source: snippet_data.as_ref().map(|(source, _)| source.clone()),
     })
+}
+
+fn parse_query_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(|term| term.to_lowercase())
+        .collect()
+}
+
+fn first_match_position(hay_lower: &str, query_terms: &[String]) -> Option<(usize, usize)> {
+    let mut best_match: Option<(usize, usize)> = None;
+
+    for term in query_terms {
+        if let Some(pos) = hay_lower.find(term) {
+            best_match = match best_match {
+                None => Some((pos, term.len())),
+                Some((best_pos, best_len)) => {
+                    if pos < best_pos || (pos == best_pos && term.len() > best_len) {
+                        Some((pos, term.len()))
+                    } else {
+                        Some((best_pos, best_len))
+                    }
+                }
+            };
+        }
+    }
+
+    best_match
+}
+
+fn previous_char_boundary(text: &str, index: usize) -> usize {
+    let mut cursor = index.min(text.len());
+    while cursor > 0 && !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    cursor
+}
+
+fn next_char_boundary(text: &str, index: usize) -> usize {
+    let mut cursor = index.min(text.len());
+    while cursor < text.len() && !text.is_char_boundary(cursor) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn highlight_query_terms(text: &str, query_terms: &[String]) -> String {
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let text_lower = text.to_lowercase();
+
+    for term in query_terms {
+        if term.is_empty() {
+            continue;
+        }
+
+        let mut search_from = 0usize;
+        while search_from < text_lower.len() {
+            let Some(relative) = text_lower[search_from..].find(term) else {
+                break;
+            };
+
+            let raw_start = search_from + relative;
+            let raw_end = raw_start + term.len();
+            let start = previous_char_boundary(text, raw_start);
+            let end = next_char_boundary(text, raw_end.min(text.len()));
+            if start < end {
+                ranges.push((start, end));
+            }
+
+            search_from = raw_end;
+        }
+    }
+
+    if ranges.is_empty() {
+        return text.to_string();
+    }
+
+    ranges.sort_unstable_by_key(|(start, _)| *start);
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        if let Some((_, last_end)) = merged.last_mut() {
+            if start <= *last_end {
+                if end > *last_end {
+                    *last_end = end;
+                }
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+
+    let mut result = String::with_capacity(text.len() + merged.len() * 4);
+    let mut cursor = 0usize;
+    for (start, end) in merged {
+        result.push_str(&text[cursor..start]);
+        result.push_str("**");
+        result.push_str(&text[start..end]);
+        result.push_str("**");
+        cursor = end;
+    }
+    result.push_str(&text[cursor..]);
+
+    result
 }
 
 fn build_fts_query(query: &str) -> Option<String> {
@@ -656,5 +764,46 @@ fn build_fts_query(query: &str) -> Option<String> {
         None
     } else {
         Some(terms.join(" "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_snippet, highlight_query_terms};
+
+    #[test]
+    fn highlight_query_terms_marks_multiple_case_insensitive_matches() {
+        let highlighted = highlight_query_terms("Rust and swift and RUST", &["rust".into()]);
+        assert_eq!(highlighted, "**Rust** and swift and **RUST**");
+    }
+
+    #[test]
+    fn build_snippet_handles_multi_word_queries_by_term() {
+        let result = build_snippet(
+            "Launcher",
+            "",
+            "",
+            "Rust and Swift can work together in a search result list preview.",
+            "swift work",
+        );
+
+        let (source, snippet) = result.expect("snippet should be present");
+        assert_eq!(source, "note");
+        assert!(snippet.contains("**Swift**"), "snippet was: {snippet}");
+        assert!(snippet.contains("**work**"), "snippet was: {snippet}");
+    }
+
+    #[test]
+    fn build_snippet_ignores_title_only_matches() {
+        let result = build_snippet(
+            "Swift Launcher",
+            "",
+            "",
+            "No matching content here.",
+            "swift",
+        );
+        let (source, snippet) = result.expect("snippet should be present");
+        assert_eq!(source, "title");
+        assert!(snippet.contains("**Swift**"), "snippet was: {snippet}");
     }
 }

@@ -354,7 +354,7 @@ private struct ResultRow: View {
             var piece = AttributedString(segment.text)
             if segment.isHighlight {
                 piece.foregroundColor = Color(red: 25 / 255, green: 25 / 255, blue: 25 / 255)
-                piece.backgroundColor = Color(red: 1.0, green: 238 / 255, blue: 170 / 255)
+                piece.backgroundColor = Color(red: 1.0, green: 240 / 255, blue: 120 / 255)
                 piece.font = .system(size: 12, weight: .semibold)
             } else {
                 piece.foregroundColor = Color(white: 70 / 255)
