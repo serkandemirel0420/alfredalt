@@ -32,16 +32,17 @@ struct WindowConfigurator: NSViewRepresentable {
         if !coordinator.configured {
             coordinator.configured = true
             window.minSize = desiredSize
-            window.maxSize = NSSize(width: 10_000, height: 10_000)
+            window.maxSize = desiredSize
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
-            window.isMovableByWindowBackground = true
+            window.isMovableByWindowBackground = false
             window.isOpaque = false
             window.backgroundColor = .clear
-            window.hasShadow = true
+            window.hasShadow = false
             window.level = .floating
             window.styleMask.insert(.fullSizeContentView)
             window.styleMask.remove(.resizable)
+            window.toolbar = nil
 
             window.standardWindowButton(.closeButton)?.isHidden = true
             window.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -50,6 +51,13 @@ struct WindowConfigurator: NSViewRepresentable {
             if let contentView = window.contentView {
                 contentView.wantsLayer = true
                 contentView.layer?.backgroundColor = NSColor.clear.cgColor
+                contentView.layer?.masksToBounds = true
+            }
+
+            if let superview = window.contentView?.superview {
+                superview.wantsLayer = true
+                superview.layer?.backgroundColor = NSColor.clear.cgColor
+                superview.layer?.masksToBounds = true
             }
         }
 
@@ -57,14 +65,17 @@ struct WindowConfigurator: NSViewRepresentable {
         window.maxSize = desiredSize
 
         let targetSize = desiredSize
-        if abs(window.frame.size.width - targetSize.width) <= 0.5,
-           abs(window.frame.size.height - targetSize.height) <= 0.5 {
+        let targetFrameSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetSize)).size
+        let currentFrameSize = window.frame.size
+        if abs(currentFrameSize.width - targetFrameSize.width) <= 0.5,
+           abs(currentFrameSize.height - targetFrameSize.height) <= 0.5 {
             return
         }
 
         var frame = window.frame
-        frame.origin.y += frame.height - targetSize.height
-        frame.size = targetSize
-        window.setFrame(frame, display: true, animate: true)
+        let currentMaxY = frame.maxY
+        frame.size = targetFrameSize
+        frame.origin.y = currentMaxY - frame.height
+        window.setFrame(frame, display: true, animate: false)
     }
 }

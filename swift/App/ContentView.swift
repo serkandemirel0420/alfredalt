@@ -21,6 +21,11 @@ struct ContentView: View {
     @FocusState private var searchFieldFocused: Bool
     @State private var selectedIndex = 0
     @State private var measuredShellHeight: CGFloat = launcherEmptyHeight
+    @State private var resultsScrollProxy: ScrollViewProxy?
+
+    private var resultsViewportHeight: CGFloat {
+        launcherResultRowHeight * launcherMaxVisibleRows
+    }
 
     var body: some View {
         launcherShell(width: launcherWindowWidth)
@@ -63,6 +68,16 @@ struct ContentView: View {
             } else if selectedIndex >= viewModel.results.count {
                 selectedIndex = max(0, viewModel.results.count - 1)
             }
+
+            if let proxy = resultsScrollProxy {
+                scrollSelectionIntoView(using: proxy, animated: false)
+            }
+        }
+        .onChange(of: selectedIndex) { oldValue, newValue in
+            guard oldValue != newValue, let proxy = resultsScrollProxy else {
+                return
+            }
+            scrollSelectionIntoView(using: proxy, animated: true)
         }
         .onChange(of: viewModel.launcherFocusRequestID) { _, _ in
             searchFieldFocused = true
@@ -115,47 +130,60 @@ struct ContentView: View {
                     .padding(.top, 6)
             }
 
-            if viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("Alfred Update Available")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(Color(white: 20 / 255))
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.top, 16)
-                    .padding(.bottom, 4)
-            } else {
-                if viewModel.results.isEmpty {
+            let isEmptyQuery = viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            Group {
+                if isEmptyQuery {
+                    Text("Alfred Update Available")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(Color(white: 20 / 255))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                } else if viewModel.results.isEmpty {
                     Text("No matching results. Press Enter to add this as a new entry.")
                         .font(.system(size: 13))
                         .italic()
                         .foregroundStyle(Color(white: 95 / 255))
-                        .padding(.top, 8)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 } else {
-                    ScrollView {
-                        LazyVStack(spacing: 0) {
-                            ForEach(Array(viewModel.results.enumerated()), id: \.element.id) { idx, item in
-                                let isSelected = idx == selectedIndex
-                                ResultRow(
-                                    item: item,
-                                    isSelected: isSelected,
-                                    onHover: {
-                                        selectedIndex = idx
-                                    },
-                                    onActivate: {
-                                        selectedIndex = idx
-                                        activateCurrentSelection()
-                                    }
-                                )
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                ForEach(Array(viewModel.results.enumerated()), id: \.element.id) { idx, item in
+                                    let isSelected = idx == selectedIndex
+                                    ResultRow(
+                                        item: item,
+                                        isSelected: isSelected,
+                                        onHover: {
+                                            selectedIndex = idx
+                                        },
+                                        onActivate: {
+                                            selectedIndex = idx
+                                            activateCurrentSelection()
+                                        }
+                                    )
+                                    .id(item.id)
 
-                                if idx + 1 < viewModel.results.count {
-                                    Divider()
+                                    if idx + 1 < viewModel.results.count {
+                                        Divider()
+                                    }
                                 }
                             }
                         }
+                        .onAppear {
+                            resultsScrollProxy = proxy
+                            scrollSelectionIntoView(using: proxy, animated: false)
+                        }
+                        .onDisappear {
+                            if resultsScrollProxy != nil {
+                                resultsScrollProxy = nil
+                            }
+                        }
                     }
-                    .frame(maxHeight: launcherResultRowHeight * launcherMaxVisibleRows)
-                    .padding(.top, 8)
                 }
             }
+            .id(isEmptyQuery ? "launcher-empty-state" : "launcher-results-state")
+            .padding(.top, 8)
+            .frame(maxWidth: .infinity, minHeight: resultsViewportHeight, maxHeight: resultsViewportHeight, alignment: .top)
+            .clipped()
         }
         .padding(14)
         .frame(width: width)
@@ -175,6 +203,25 @@ struct ContentView: View {
                 viewModel.beginEditorPresentation()
                 openWindow(id: "editor")
             }
+        }
+    }
+
+    private func scrollSelectionIntoView(using proxy: ScrollViewProxy, animated: Bool) {
+        guard viewModel.results.indices.contains(selectedIndex) else {
+            return
+        }
+
+        let targetID = viewModel.results[selectedIndex].id
+        let scrollAction = {
+            proxy.scrollTo(targetID)
+        }
+
+        if animated {
+            withAnimation(.easeInOut(duration: 0.14)) {
+                scrollAction()
+            }
+        } else {
+            scrollAction()
         }
     }
 
@@ -359,15 +406,9 @@ private struct ResultRow: View {
 }
 
 private struct EditorSheet: View {
-    private struct ResizeDragState {
-        let key: String
-        let startWidth: Double
-    }
-
     @ObservedObject var viewModel: LauncherViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var editorCursorCharIndex: Int?
-    @State private var resizeDrag: ResizeDragState?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -390,100 +431,8 @@ private struct EditorSheet: View {
                 editorCursorCharIndex = cursorIndex
             }
             .padding(10)
-            .background(Color(red: 246 / 255, green: 246 / 255, blue: 246 / 255))
+            .background(Color(nsColor: NSColor.textBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-            if let item = viewModel.selectedItem, !item.images.isEmpty {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 10) {
-                        ForEach(item.images, id: \.imageKey) { image in
-                            VStack(alignment: .leading, spacing: 6) {
-                                ZStack(alignment: .bottomTrailing) {
-                                    Group {
-                                        if let nsImage = NSImage(data: image.bytes) {
-                                            Image(nsImage: nsImage)
-                                                .resizable()
-                                                .aspectRatio(contentMode: .fit)
-                                        } else {
-                                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                                .fill(Color.gray.opacity(0.2))
-                                                .overlay(Text("Image").font(.caption))
-                                        }
-                                    }
-                                    .frame(width: previewWidth(for: image.imageKey), height: 110)
-                                    .background(Color.white)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundStyle(.white)
-                                        .padding(5)
-                                        .background(Color.black.opacity(0.58))
-                                        .clipShape(Circle())
-                                        .padding(6)
-                                        .contentShape(Rectangle())
-                                        .gesture(
-                                            DragGesture(minimumDistance: 0)
-                                                .onChanged { value in
-                                                    handleResizeDragChanged(for: image.imageKey, value: value)
-                                                }
-                                                .onEnded { _ in
-                                                    handleResizeDragEnded()
-                                                }
-                                        )
-                                }
-                                .frame(width: previewWidth(for: image.imageKey), height: 110)
-
-                                HStack {
-                                    Text(image.imageKey)
-                                        .font(.system(size: 10))
-                                        .lineLimit(1)
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button(role: .destructive) {
-                                        Task { await viewModel.removeImage(imageKey: image.imageKey) }
-                                    } label: {
-                                        Image(systemName: "trash")
-                                    }
-                                    .buttonStyle(.borderless)
-                                }
-
-                                HStack(spacing: 8) {
-                                    Button {
-                                        Task { await viewModel.decreaseImageDisplayWidth(imageKey: image.imageKey) }
-                                    } label: {
-                                        Image(systemName: "minus.circle")
-                                    }
-                                    .buttonStyle(.borderless)
-
-                                    Text("\(Int(viewModel.imageDisplayWidth(for: image.imageKey)))px")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(Color(white: 0.35))
-
-                                    Button {
-                                        Task { await viewModel.increaseImageDisplayWidth(imageKey: image.imageKey) }
-                                    } label: {
-                                        Image(systemName: "plus.circle")
-                                    }
-                                    .buttonStyle(.borderless)
-                                }
-                            }
-                            .padding(8)
-                            .background(Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255))
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
-                            )
-                        }
-                    }
-                }
-                .frame(maxHeight: 170)
-            }
-
-            Text("\(viewModel.selectedItem?.images.count ?? 0) image(s)")
-                .font(.system(size: 12))
-                .foregroundStyle(Color(white: 0.4))
         }
         .padding(16)
         .frame(minWidth: 760, minHeight: 500)
@@ -519,29 +468,5 @@ private struct EditorSheet: View {
         }
 
         return false
-    }
-
-    private func previewWidth(for imageKey: String) -> CGFloat {
-        let logicalWidth = viewModel.imageDisplayWidth(for: imageKey)
-        let scaled = logicalWidth * 0.45
-        return CGFloat(min(max(scaled, 140), 360))
-    }
-
-    private func handleResizeDragChanged(for imageKey: String, value: DragGesture.Value) {
-        if resizeDrag?.key != imageKey {
-            resizeDrag = ResizeDragState(key: imageKey, startWidth: viewModel.imageDisplayWidth(for: imageKey))
-        }
-
-        guard let drag = resizeDrag else {
-            return
-        }
-
-        let delta = Double(max(value.translation.width, value.translation.height))
-        _ = viewModel.setImageDisplayWidthTransient(imageKey: imageKey, width: drag.startWidth + delta)
-    }
-
-    private func handleResizeDragEnded() {
-        resizeDrag = nil
-        Task { await viewModel.persistEditorState() }
     }
 }

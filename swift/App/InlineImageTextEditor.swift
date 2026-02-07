@@ -4,6 +4,12 @@ import SwiftUI
 private let imageRefPattern = #"!\[image\]\(alfred://image/([^\)\?]+)(?:\?w=(\d+))?\)"#
 private let imageKeyAttribute = NSAttributedString.Key("InlineImageKey")
 private let imageWidthAttribute = NSAttributedString.Key("InlineImageWidth")
+private let editorFont = NSFont.systemFont(ofSize: 15)
+private let editorTextColor = NSColor.labelColor
+private let editorBaseAttributes: [NSAttributedString.Key: Any] = [
+    .font: editorFont,
+    .foregroundColor: editorTextColor,
+]
 
 struct InlineImageTextEditor: NSViewRepresentable {
     @Binding var text: String
@@ -28,12 +34,21 @@ struct InlineImageTextEditor: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.isRichText = true
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
         textView.importsGraphics = false
         textView.usesAdaptiveColorMappingForDarkAppearance = false
         textView.backgroundColor = .clear
-        textView.font = NSFont.systemFont(ofSize: 15)
-        textView.textColor = NSColor(calibratedWhite: 0.15, alpha: 1)
+        textView.drawsBackground = false
+        textView.font = editorFont
+        textView.textColor = editorTextColor
+        textView.insertionPointColor = editorTextColor
+        textView.typingAttributes = editorBaseAttributes
         textView.textContainerInset = NSSize(width: 0, height: 6)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.allowsUndo = true
         textView.isAutomaticTextCompletionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -80,6 +95,8 @@ struct InlineImageTextEditor: NSViewRepresentable {
             isApplyingProgrammaticUpdate = true
             let attributed = makeAttributedText(from: parent.text, imagesByKey: parent.imagesByKey, defaultImageWidth: parent.defaultImageWidth)
             textView.textStorage?.setAttributedString(attributed)
+            normalizeVisibleTextAttributes(in: textView)
+            applyEditorTypingAppearance(to: textView)
 
             let newCursorAttributedLocation = attributedLocation(fromPlainOffset: oldPlainCursor, in: textView)
             let safeLocation = max(0, min(newCursorAttributedLocation, textView.string.utf16.count))
@@ -95,6 +112,11 @@ struct InlineImageTextEditor: NSViewRepresentable {
             guard !isApplyingProgrammaticUpdate, let textView else {
                 return
             }
+
+            isApplyingProgrammaticUpdate = true
+            normalizeVisibleTextAttributes(in: textView)
+            applyEditorTypingAppearance(to: textView)
+            isApplyingProgrammaticUpdate = false
 
             let plain = makePlainText(from: textView.attributedString())
             if plain != parent.text {
@@ -168,10 +190,7 @@ private func makeAttributedText(
     defaultImageWidth: CGFloat
 ) -> NSAttributedString {
     let output = NSMutableAttributedString()
-    let baseAttributes: [NSAttributedString.Key: Any] = [
-        .font: NSFont.systemFont(ofSize: 15),
-        .foregroundColor: NSColor(calibratedWhite: 0.15, alpha: 1),
-    ]
+    let baseAttributes = editorBaseAttributes
 
     guard let regex = try? NSRegularExpression(pattern: imageRefPattern) else {
         output.append(NSAttributedString(string: plainText, attributes: baseAttributes))
@@ -200,8 +219,10 @@ private func makeAttributedText(
 
         if let data = imagesByKey[key], let image = NSImage(data: data) {
             let resized = resizedImage(image, targetWidth: CGFloat(width))
+            let framed = imageWithBorder(resized)
             let attachment = NSTextAttachment()
-            attachment.image = resized
+            attachment.image = framed
+            attachment.bounds = NSRect(origin: .zero, size: framed.size)
 
             let attachmentString = NSMutableAttributedString(attachment: attachment)
             attachmentString.addAttributes([
@@ -222,6 +243,41 @@ private func makeAttributedText(
     }
 
     return output
+}
+
+private func applyEditorTypingAppearance(to textView: NSTextView) {
+    textView.font = editorFont
+    textView.textColor = editorTextColor
+    textView.insertionPointColor = editorTextColor
+    textView.typingAttributes = editorBaseAttributes
+}
+
+private func normalizeVisibleTextAttributes(in textView: NSTextView) {
+    guard let storage = textView.textStorage else {
+        return
+    }
+
+    let fullRange = NSRange(location: 0, length: storage.length)
+    guard fullRange.length > 0 else {
+        return
+    }
+
+    var plainTextRanges: [NSRange] = []
+    storage.enumerateAttribute(.attachment, in: fullRange, options: []) { attachment, range, _ in
+        if attachment == nil {
+            plainTextRanges.append(range)
+        }
+    }
+
+    guard !plainTextRanges.isEmpty else {
+        return
+    }
+
+    storage.beginEditing()
+    for range in plainTextRanges {
+        storage.addAttributes(editorBaseAttributes, range: range)
+    }
+    storage.endEditing()
 }
 
 private func makePlainText(from attributed: NSAttributedString) -> String {
@@ -279,4 +335,26 @@ private func resizedImage(_ image: NSImage, targetWidth: CGFloat) -> NSImage {
     )
 
     return newImage
+}
+
+private func imageWithBorder(_ image: NSImage) -> NSImage {
+    let borderWidth: CGFloat = 1
+    let framedSize = NSSize(width: image.size.width + borderWidth * 2, height: image.size.height + borderWidth * 2)
+    let framed = NSImage(size: framedSize)
+    framed.lockFocus()
+    defer { framed.unlockFocus() }
+
+    image.draw(
+        in: NSRect(x: borderWidth, y: borderWidth, width: image.size.width, height: image.size.height),
+        from: NSRect(origin: .zero, size: image.size),
+        operation: .sourceOver,
+        fraction: 1
+    )
+
+    NSColor.separatorColor.setStroke()
+    let borderPath = NSBezierPath(rect: NSRect(x: 0.5, y: 0.5, width: framedSize.width - 1, height: framedSize.height - 1))
+    borderPath.lineWidth = 1
+    borderPath.stroke()
+
+    return framed
 }

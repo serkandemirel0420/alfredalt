@@ -325,34 +325,23 @@ final class LauncherViewModel: ObservableObject {
     }
 
     private func appendMarkdownImageRef(to note: String, key: String) -> String {
-        let ref = "![image](\(noteImageURLPrefix)\(key))"
-        if note.isEmpty {
-            return ref
-        }
-        if note.hasSuffix("\n") {
-            return note + ref
-        }
-        return note + "\n" + ref
+        insertMarkdownImageRef(into: note, key: key, cursorCharIndex: note.count)
     }
 
     private func insertMarkdownImageRef(into note: String, key: String, cursorCharIndex: Int?) -> String {
         let ref = "![image](\(noteImageURLPrefix)\(key))"
-        guard let cursorCharIndex else {
-            return appendMarkdownImageRef(to: note, key: key)
-        }
-
-        let bounded = max(0, min(cursorCharIndex, note.count))
+        let bounded = max(0, min(cursorCharIndex ?? note.count, note.count))
         let insertionIndex = note.index(note.startIndex, offsetBy: bounded)
         var output = note
+        let needsLeadingNewline = insertionIndex > note.startIndex && note[note.index(before: insertionIndex)] != "\n"
+        let needsTrailingNewline = insertionIndex < note.endIndex ? note[insertionIndex] != "\n" : true
 
-        let beforeNeedsBreak = insertionIndex > note.startIndex && note[note.index(before: insertionIndex)] != "\n"
-        let afterNeedsBreak = insertionIndex < note.endIndex && note[insertionIndex] != "\n"
-
-        var insertion = ref
-        if beforeNeedsBreak {
-            insertion = "\n" + insertion
+        var insertion = ""
+        if needsLeadingNewline {
+            insertion += "\n"
         }
-        if afterNeedsBreak {
+        insertion += ref
+        if needsTrailingNewline {
             insertion += "\n"
         }
 
@@ -361,12 +350,11 @@ final class LauncherViewModel: ObservableObject {
     }
 
     private func removeMarkdownImageRef(from note: String, key: String) -> String {
-        let target = "\(noteImageURLPrefix)\(key)"
-        let filteredLines = note
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !$0.contains(target) }
-
-        return filteredLines.joined(separator: "\n")
+        guard let regex = imageRefRegex(for: key) else {
+            return note
+        }
+        let noteRange = NSRange(note.startIndex..<note.endIndex, in: note)
+        return regex.stringByReplacingMatches(in: note, options: [], range: noteRange, withTemplate: "")
     }
 
     private func markdownImageWidth(in note: String, key: String) -> Double? {
