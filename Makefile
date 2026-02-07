@@ -53,7 +53,8 @@ build-app: bridge
 		"$$LIB_PATH" \
 		-o $(APP_BINARY)
 
-run: build-app
+run:
+	$(MAKE) build-app
 	open $(APP_BUNDLE)
 
 run-cli: build-app

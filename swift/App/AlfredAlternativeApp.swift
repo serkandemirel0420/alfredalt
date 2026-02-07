@@ -26,6 +26,10 @@ final class AlfredAlternativeAppDelegate: NSObject, NSApplicationDelegate {
         viewModel?.revealLauncherIfNeeded()
     }
 
+    func applicationDidResignActive(_ notification: Notification) {
+        viewModel?.dismissLauncher()
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         hotKeyMonitor?.unregister()
         hotKeyMonitor = nil

@@ -135,6 +135,7 @@ struct ContentView: View {
                                         let isSelected = idx == selectedIndex
                                         ResultRow(
                                             item: item,
+                                            query: viewModel.query,
                                             isSelected: isSelected,
                                             onHover: {
                                                 selectedIndex = idx
@@ -297,6 +298,7 @@ private struct WindowAccessor: NSViewRepresentable {
 
 private struct ResultRow: View {
     let item: SearchResultRecord
+    let query: String
     let isSelected: Bool
     let onHover: () -> Void
     let onActivate: () -> Void
@@ -329,8 +331,13 @@ private struct ResultRow: View {
 
     private func attributedSnippet(_ snippet: String) -> AttributedString {
         var result = AttributedString()
+        let parsed = snippetSegments(snippet)
+        let hasVisibleHighlight = parsed.contains {
+            $0.isHighlight && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        let segments = hasVisibleHighlight ? parsed : queryHighlightedSegments(snippet)
 
-        for segment in snippetSegments(snippet) {
+        for segment in segments {
             var piece = AttributedString(segment.text)
             if segment.isHighlight {
                 piece.foregroundColor = Color(red: 25 / 255, green: 25 / 255, blue: 25 / 255)
@@ -356,14 +363,19 @@ private struct ResultRow: View {
             return nil
         }
 
-        let withoutEllipsis = trimmed
+        let plain = trimmed.replacingOccurrences(of: "**", with: "")
+        let withoutEllipsis = plain
             .replacingOccurrences(of: "...", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !withoutEllipsis.isEmpty else {
             return nil
         }
 
-        guard trimmed.contains("**") else {
+        if trimmed.contains("**") || containsQueryTerm(in: plain) {
+            return trimmed
+        }
+
+        guard query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
 
@@ -395,6 +407,95 @@ private struct ResultRow: View {
         }
 
         return segments
+    }
+
+    private func queryHighlightedSegments(_ snippet: String) -> [(text: String, isHighlight: Bool)] {
+        let plain = snippet.replacingOccurrences(of: "**", with: "")
+        guard !plain.isEmpty else {
+            return []
+        }
+
+        let terms = queryTerms
+        guard !terms.isEmpty else {
+            return [(plain, false)]
+        }
+
+        let lower = plain.lowercased() as NSString
+        let original = plain as NSString
+        var ranges: [NSRange] = []
+
+        for term in terms {
+            var searchStart = 0
+            while searchStart < lower.length {
+                let searchRange = NSRange(location: searchStart, length: lower.length - searchStart)
+                let found = lower.range(of: term, options: [], range: searchRange)
+                if found.location == NSNotFound || found.length == 0 {
+                    break
+                }
+                ranges.append(found)
+                searchStart = found.location + found.length
+            }
+        }
+
+        guard !ranges.isEmpty else {
+            return [(plain, false)]
+        }
+
+        ranges.sort { lhs, rhs in
+            if lhs.location == rhs.location {
+                return lhs.length < rhs.length
+            }
+            return lhs.location < rhs.location
+        }
+
+        var merged: [NSRange] = []
+        for range in ranges {
+            if let last = merged.last {
+                let lastEnd = last.location + last.length
+                let rangeEnd = range.location + range.length
+                if range.location <= lastEnd {
+                    let union = NSRange(
+                        location: last.location,
+                        length: max(lastEnd, rangeEnd) - last.location
+                    )
+                    merged[merged.count - 1] = union
+                } else {
+                    merged.append(range)
+                }
+            } else {
+                merged.append(range)
+            }
+        }
+
+        var segments: [(text: String, isHighlight: Bool)] = []
+        var cursor = 0
+        for range in merged {
+            if range.location > cursor {
+                let prefixRange = NSRange(location: cursor, length: range.location - cursor)
+                segments.append((original.substring(with: prefixRange), false))
+            }
+            segments.append((original.substring(with: range), true))
+            cursor = range.location + range.length
+        }
+
+        if cursor < original.length {
+            let suffixRange = NSRange(location: cursor, length: original.length - cursor)
+            segments.append((original.substring(with: suffixRange), false))
+        }
+
+        return segments
+    }
+
+    private var queryTerms: [String] {
+        query
+            .split(whereSeparator: \.isWhitespace)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty }
+    }
+
+    private func containsQueryTerm(in text: String) -> Bool {
+        let lower = text.lowercased()
+        return queryTerms.contains { lower.contains($0) }
     }
 }
 
