@@ -398,6 +398,7 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
         }
 
         // First try FTS prefix match, then LIKE substring hits, and finally a fuzzy fallback.
+        let query_terms = parse_query_terms(query);
         let mut results = Vec::with_capacity(limit.max(0) as usize);
         let mut seen_ids = HashSet::with_capacity(limit.max(0) as usize);
 
@@ -411,7 +412,9 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
              LIMIT ?2",
             )?;
             let rows = stmt
-                .query_map(params![fts_query, limit], |row| map_search_row(row, query))?
+                .query_map(params![fts_query, limit], |row| {
+                    map_search_row(row, &query_terms)
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for row in rows {
                 if seen_ids.insert(row.id) {
@@ -429,7 +432,9 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
                LIMIT ?2"#,
             )?;
             let rows = stmt
-                .query_map(params![query, remaining], |row| map_search_row(row, query))?
+                .query_map(params![query, remaining], |row| {
+                    map_search_row(row, &query_terms)
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for r in rows {
                 if seen_ids.insert(r.id) {
@@ -443,7 +448,7 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
 
         if (results.len() as i64) < limit {
             let remaining = limit - results.len() as i64;
-            let fuzzy_rows = fuzzy_search_rows(conn, query, remaining, &seen_ids)?;
+            let fuzzy_rows = fuzzy_search_rows(conn, &query_terms, remaining, &seen_ids)?;
             for row in fuzzy_rows {
                 if seen_ids.insert(row.id) {
                     results.push(row);
@@ -460,7 +465,7 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
 
 fn fuzzy_search_rows(
     conn: &Connection,
-    query: &str,
+    query_terms: &[String],
     limit: i64,
     seen_ids: &HashSet<i64>,
 ) -> Result<Vec<SearchResult>> {
@@ -468,7 +473,6 @@ fn fuzzy_search_rows(
         return Ok(Vec::new());
     }
 
-    let query_terms = parse_query_terms(query);
     let has_fuzzy_term = query_terms
         .iter()
         .any(|term| term.chars().count() >= FUZZY_QUERY_TERM_MIN_CHARS);
@@ -495,43 +499,65 @@ fn fuzzy_search_rows(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    let mut scored: Vec<(f32, SearchResult)> = Vec::new();
+    let mut scored: Vec<FuzzyCandidate> = Vec::new();
     for (id, title, subtitle, note, keywords) in rows {
         if seen_ids.contains(&id) {
             continue;
         }
 
-        let score = fuzzy_row_score(&title, &note, &query_terms);
+        let score = fuzzy_row_score(&title, &note, query_terms);
         if score < FUZZY_SIMILARITY_THRESHOLD {
             continue;
         }
 
-        let snippet_data = build_snippet(&title, &subtitle, &keywords, &note, query);
-        scored.push((
+        scored.push(FuzzyCandidate {
             score,
-            SearchResult {
-                id,
-                title,
-                subtitle: String::new(),
-                snippet: snippet_data.as_ref().map(|(_, text)| text.clone()),
-                snippet_source: None,
-            },
-        ));
+            id,
+            title,
+            subtitle,
+            keywords,
+            note,
+        });
     }
 
-    scored.sort_by(|(left_score, left_row), (right_score, right_row)| {
-        right_score
-            .partial_cmp(left_score)
+    scored.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
             .unwrap_or(Ordering::Equal)
-            .then_with(|| left_row.title.cmp(&right_row.title))
-            .then_with(|| left_row.id.cmp(&right_row.id))
+            .then_with(|| left.title.cmp(&right.title))
+            .then_with(|| left.id.cmp(&right.id))
     });
 
     Ok(scored
         .into_iter()
         .take(limit as usize)
-        .map(|(_, row)| row)
+        .map(|candidate| {
+            let snippet_data = build_snippet_with_terms(
+                &candidate.title,
+                &candidate.subtitle,
+                &candidate.keywords,
+                &candidate.note,
+                query_terms,
+            );
+            SearchResult {
+                id: candidate.id,
+                title: candidate.title,
+                subtitle: String::new(),
+                snippet: snippet_data.map(|(_, text)| text),
+                snippet_source: None,
+            }
+        })
         .collect())
+}
+
+struct FuzzyCandidate {
+    score: f32,
+    id: i64,
+    title: String,
+    subtitle: String,
+    keywords: String,
+    note: String,
 }
 
 pub fn insert_item(title: &str) -> Result<i64> {
@@ -659,6 +685,7 @@ pub fn update_item(id: i64, note: &str, images: Option<&[NoteImage]>) -> Result<
     })
 }
 
+#[cfg(test)]
 fn build_snippet(
     title: &str,
     subtitle: &str,
@@ -667,6 +694,16 @@ fn build_snippet(
     query: &str,
 ) -> Option<(String, String)> {
     let query_terms = parse_query_terms(query);
+    build_snippet_with_terms(title, subtitle, keywords, note, &query_terms)
+}
+
+fn build_snippet_with_terms(
+    title: &str,
+    subtitle: &str,
+    keywords: &str,
+    note: &str,
+    query_terms: &[String],
+) -> Option<(String, String)> {
     if query_terms.is_empty() {
         return None;
     }
@@ -674,16 +711,16 @@ fn build_snippet(
     let sanitized_note = sanitize_note_for_preview(note);
 
     // Prefer note previews; use title as fallback.
-    if let Some(snippet) = build_field_snippet("note", &sanitized_note, &query_terms, 24) {
+    if let Some(snippet) = build_field_snippet("note", &sanitized_note, query_terms, 24) {
         return Some(snippet);
     }
-    if let Some(snippet) = build_field_snippet("title", title, &query_terms, 32) {
+    if let Some(snippet) = build_field_snippet("title", title, query_terms, 32) {
         return Some(snippet);
     }
-    if let Some(snippet) = build_field_snippet("subtitle", subtitle, &query_terms, 32) {
+    if let Some(snippet) = build_field_snippet("subtitle", subtitle, query_terms, 32) {
         return Some(snippet);
     }
-    build_field_snippet("keywords", keywords, &query_terms, 32)
+    build_field_snippet("keywords", keywords, query_terms, 32)
 }
 
 fn build_field_snippet(
@@ -728,18 +765,21 @@ fn build_field_snippet(
     Some((source.to_string(), snippet))
 }
 
-fn map_search_row(row: &rusqlite::Row<'_>, query: &str) -> rusqlite::Result<SearchResult> {
+fn map_search_row(
+    row: &rusqlite::Row<'_>,
+    query_terms: &[String],
+) -> rusqlite::Result<SearchResult> {
     let title: String = row.get(1)?;
     let subtitle: String = row.get(2)?;
     let note: String = row.get(3)?;
     let keywords: String = row.get(4)?;
-    let snippet_data = build_snippet(&title, &subtitle, &keywords, &note, query);
+    let snippet_data = build_snippet_with_terms(&title, &subtitle, &keywords, &note, query_terms);
 
     Ok(SearchResult {
         id: row.get(0)?,
         title,
         subtitle: String::new(),
-        snippet: snippet_data.as_ref().map(|(_, text)| text.clone()),
+        snippet: snippet_data.map(|(_, text)| text),
         snippet_source: None,
     })
 }

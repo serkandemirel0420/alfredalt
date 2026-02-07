@@ -8,6 +8,7 @@ private let inlineImageMinWidth: Double = 140
 private let inlineImageMaxWidth: Double = 1200
 private let inlineImageResizeStep: Double = 80
 private let autosaveDebounceNanoseconds: UInt64 = 1_200_000_000
+private let searchDebounceNanoseconds: UInt64 = 90_000_000
 
 @MainActor
 final class LauncherViewModel: ObservableObject {
@@ -295,7 +296,7 @@ final class LauncherViewModel: ObservableObject {
         pendingSearchTask?.cancel()
         isSearching = true
         pendingSearchTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 160_000_000)
+            try? await Task.sleep(nanoseconds: searchDebounceNanoseconds)
             guard let self, !Task.isCancelled else {
                 return
             }
@@ -317,7 +318,9 @@ final class LauncherViewModel: ObservableObject {
         isSearching = true
 
         do {
-            let fetched = try RustBridgeClient.search(query: trimmed)
+            let fetched = try await Task.detached(priority: .userInitiated) {
+                try RustBridgeClient.search(query: trimmed)
+            }.value
             guard generation == searchGeneration,
                   trimmed == query.trimmingCharacters(in: .whitespacesAndNewlines)
             else {

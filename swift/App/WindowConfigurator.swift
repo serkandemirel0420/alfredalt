@@ -18,14 +18,12 @@ struct WindowConfigurator: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            guard let window = nsView.window else {
-                return
-            }
-
-            configure(window: window, coordinator: context.coordinator)
-            onWindowResolved?(window)
+        guard let window = nsView.window else {
+            return
         }
+
+        configure(window: window, coordinator: context.coordinator)
+        onWindowResolved?(window)
     }
 
     private func configure(window: NSWindow, coordinator: Coordinator) {
@@ -81,6 +79,6 @@ struct WindowConfigurator: NSViewRepresentable {
         let currentMaxY = frame.maxY
         frame.size = targetFrameSize
         frame.origin.y = currentMaxY - frame.height
-        window.setFrame(frame, display: true, animate: false)
+        window.setFrame(frame, display: false, animate: false)
     }
 }
