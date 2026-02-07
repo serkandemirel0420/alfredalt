@@ -1,11 +1,12 @@
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{ensure, Context, Result};
+use anyhow::{Context, Result, ensure};
 use directories::ProjectDirs;
 use once_cell::sync::{Lazy, OnceCell};
-use rusqlite::{params, Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, params};
 use serde::Serialize;
 
 use crate::models::{EditableItem, Item, NoteImage, SearchResult};
@@ -15,6 +16,10 @@ pub const MAX_SCREENSHOT_BYTES: usize = 12_000_000;
 pub const MAX_NOTE_IMAGE_COUNT: usize = 24;
 pub const DEFAULT_HOTKEY: &str = "super+Space";
 const CURRENT_SCHEMA_VERSION: i64 = 4;
+const FUZZY_QUERY_TERM_MIN_CHARS: usize = 4;
+const FUZZY_SIMILARITY_THRESHOLD: f32 = 0.62;
+const FUZZY_SCAN_MULTIPLIER: i64 = 64;
+const FUZZY_SCAN_MAX_ROWS: i64 = 2048;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExportItem {
@@ -392,7 +397,7 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
             return Ok(rows);
         }
 
-        // First try FTS prefix match; then fallback to LIKE for substring hits.
+        // First try FTS prefix match, then LIKE substring hits, and finally a fuzzy fallback.
         let mut results = Vec::with_capacity(limit.max(0) as usize);
         let mut seen_ids = HashSet::with_capacity(limit.max(0) as usize);
 
@@ -420,8 +425,6 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
             let mut stmt = conn.prepare_cached(
                 r#"SELECT id, title, subtitle, note, keywords FROM items
                WHERE title LIKE '%' || ?1 || '%'
-                  OR subtitle LIKE '%' || ?1 || '%'
-                  OR keywords LIKE '%' || ?1 || '%'
                   OR note LIKE '%' || ?1 || '%'
                LIMIT ?2"#,
             )?;
@@ -438,8 +441,97 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
             }
         }
 
+        if (results.len() as i64) < limit {
+            let remaining = limit - results.len() as i64;
+            let fuzzy_rows = fuzzy_search_rows(conn, query, remaining, &seen_ids)?;
+            for row in fuzzy_rows {
+                if seen_ids.insert(row.id) {
+                    results.push(row);
+                    if results.len() as i64 >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+
         Ok(results)
     })
+}
+
+fn fuzzy_search_rows(
+    conn: &Connection,
+    query: &str,
+    limit: i64,
+    seen_ids: &HashSet<i64>,
+) -> Result<Vec<SearchResult>> {
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
+
+    let query_terms = parse_query_terms(query);
+    let has_fuzzy_term = query_terms
+        .iter()
+        .any(|term| term.chars().count() >= FUZZY_QUERY_TERM_MIN_CHARS);
+    if !has_fuzzy_term {
+        return Ok(Vec::new());
+    }
+
+    let scan_limit = (limit.max(8) * FUZZY_SCAN_MULTIPLIER).min(FUZZY_SCAN_MAX_ROWS);
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, title, subtitle, note, keywords
+         FROM items
+         ORDER BY id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map([scan_limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut scored: Vec<(f32, SearchResult)> = Vec::new();
+    for (id, title, subtitle, note, keywords) in rows {
+        if seen_ids.contains(&id) {
+            continue;
+        }
+
+        let score = fuzzy_row_score(&title, &note, &query_terms);
+        if score < FUZZY_SIMILARITY_THRESHOLD {
+            continue;
+        }
+
+        let snippet_data = build_snippet(&title, &subtitle, &keywords, &note, query);
+        scored.push((
+            score,
+            SearchResult {
+                id,
+                title,
+                subtitle: String::new(),
+                snippet: snippet_data.as_ref().map(|(_, text)| text.clone()),
+                snippet_source: None,
+            },
+        ));
+    }
+
+    scored.sort_by(|(left_score, left_row), (right_score, right_row)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left_row.title.cmp(&right_row.title))
+            .then_with(|| left_row.id.cmp(&right_row.id))
+    });
+
+    Ok(scored
+        .into_iter()
+        .take(limit as usize)
+        .map(|(_, row)| row)
+        .collect())
 }
 
 pub fn insert_item(title: &str) -> Result<i64> {
@@ -579,17 +671,19 @@ fn build_snippet(
         return None;
     }
 
+    let sanitized_note = sanitize_note_for_preview(note);
+
+    // Prefer note previews; use title as fallback.
+    if let Some(snippet) = build_field_snippet("note", &sanitized_note, &query_terms, 24) {
+        return Some(snippet);
+    }
     if let Some(snippet) = build_field_snippet("title", title, &query_terms, 32) {
         return Some(snippet);
     }
     if let Some(snippet) = build_field_snippet("subtitle", subtitle, &query_terms, 32) {
         return Some(snippet);
     }
-    if let Some(snippet) = build_field_snippet("keywords", keywords, &query_terms, 32) {
-        return Some(snippet);
-    }
-
-    build_field_snippet("note", note, &query_terms, 24)
+    build_field_snippet("keywords", keywords, &query_terms, 32)
 }
 
 fn build_field_snippet(
@@ -602,25 +696,33 @@ fn build_field_snippet(
         return None;
     }
 
-    let hay_lower = text.to_lowercase();
-    let (match_start, match_len) = first_match_position(&hay_lower, query_terms)?;
+    let field_match = find_field_match(text, query_terms)?;
+    let match_start = field_match.start;
+    let match_end = field_match.end;
     let raw_start = match_start.saturating_sub(context_chars);
-    let raw_end = match_start
-        .saturating_add(match_len)
-        .saturating_add(context_chars)
-        .min(text.len());
+    let raw_end = match_end.saturating_add(context_chars).min(text.len());
     let start = previous_char_boundary(text, raw_start);
     let end = next_char_boundary(text, raw_end);
     if start >= end {
         return None;
     }
 
-    let mut snippet = highlight_query_terms(&text[start..end], query_terms);
+    let mut snippet = if field_match.exact {
+        highlight_query_terms(&text[start..end], query_terms)
+    } else {
+        let highlight_start = match_start.saturating_sub(start);
+        let highlight_end = match_end.min(end).saturating_sub(start);
+        highlight_span(&text[start..end], highlight_start, highlight_end)
+    };
     if start > 0 {
         snippet = format!("...{snippet}");
     }
     if end < text.len() {
         snippet = format!("{snippet}...");
+    }
+
+    if snippet.matches("**").count() < 2 {
+        return None;
     }
 
     Some((source.to_string(), snippet))
@@ -636,10 +738,96 @@ fn map_search_row(row: &rusqlite::Row<'_>, query: &str) -> rusqlite::Result<Sear
     Ok(SearchResult {
         id: row.get(0)?,
         title,
-        subtitle,
+        subtitle: String::new(),
         snippet: snippet_data.as_ref().map(|(_, text)| text.clone()),
-        snippet_source: snippet_data.as_ref().map(|(source, _)| source.clone()),
+        snippet_source: None,
     })
+}
+
+fn sanitize_note_for_preview(note: &str) -> String {
+    let without_images = strip_inline_image_refs(note);
+    let collapsed = collapse_whitespace(&without_images);
+    strip_image_residue_tokens(&collapsed)
+}
+
+fn strip_inline_image_refs(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+
+    while let Some(start_rel) = text[cursor..].find("![") {
+        let start = cursor + start_rel;
+        output.push_str(&text[cursor..start]);
+
+        let alt_search = start + 2;
+        let Some(alt_end_rel) = text[alt_search..].find("](") else {
+            output.push_str(&text[start..]);
+            return output;
+        };
+        let url_start = alt_search + alt_end_rel + 2;
+        let Some(url_end_rel) = text[url_start..].find(')') else {
+            output.push_str(&text[start..]);
+            return output;
+        };
+        let url_end = url_start + url_end_rel;
+        let url = &text[url_start..url_end];
+
+        if url.starts_with("alfred://image/") {
+            cursor = url_end + 1;
+            continue;
+        }
+
+        output.push_str(&text[start..=url_end]);
+        cursor = url_end + 1;
+    }
+
+    output.push_str(&text[cursor..]);
+    output
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut previous_was_space = false;
+
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !previous_was_space {
+                output.push(' ');
+                previous_was_space = true;
+            }
+        } else {
+            output.push(ch);
+            previous_was_space = false;
+        }
+    }
+
+    output.trim().to_string()
+}
+
+fn strip_image_residue_tokens(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|token| !looks_like_image_residue(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn looks_like_image_residue(token: &str) -> bool {
+    if token.contains("alfred://image/") {
+        return true;
+    }
+
+    let trimmed = token.trim_matches(|ch: char| ",.;:()[]{}<>\"'".contains(ch));
+    if !trimmed.contains("?w=") {
+        return false;
+    }
+
+    let base = trimmed.split("?w=").next().unwrap_or("");
+    if base.starts_with("img-") || base.starts_with("pasted-") {
+        return true;
+    }
+
+    let hex_count = base.chars().filter(|ch| ch.is_ascii_hexdigit()).count();
+    let total = base.chars().count();
+    hex_count >= 6 && total <= 24
 }
 
 fn parse_query_terms(query: &str) -> Vec<String> {
@@ -651,7 +839,31 @@ fn parse_query_terms(query: &str) -> Vec<String> {
         .collect()
 }
 
-fn first_match_position(hay_lower: &str, query_terms: &[String]) -> Option<(usize, usize)> {
+#[derive(Debug, Clone, Copy)]
+struct FieldMatch {
+    start: usize,
+    end: usize,
+    exact: bool,
+}
+
+fn find_field_match(text: &str, query_terms: &[String]) -> Option<FieldMatch> {
+    let hay_lower = text.to_lowercase();
+    if let Some((start, len)) = first_exact_match_position(&hay_lower, query_terms) {
+        return Some(FieldMatch {
+            start,
+            end: start.saturating_add(len),
+            exact: true,
+        });
+    }
+
+    best_fuzzy_word_match(text, query_terms).map(|(start, end, _)| FieldMatch {
+        start,
+        end,
+        exact: false,
+    })
+}
+
+fn first_exact_match_position(hay_lower: &str, query_terms: &[String]) -> Option<(usize, usize)> {
     let mut best_match: Option<(usize, usize)> = None;
 
     for term in query_terms {
@@ -670,6 +882,149 @@ fn first_match_position(hay_lower: &str, query_terms: &[String]) -> Option<(usiz
     }
 
     best_match
+}
+
+fn collect_word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut current_start: Option<usize> = None;
+
+    for (index, ch) in text.char_indices() {
+        if ch.is_alphanumeric() {
+            if current_start.is_none() {
+                current_start = Some(index);
+            }
+        } else if let Some(start) = current_start.take() {
+            spans.push((start, index));
+        }
+    }
+
+    if let Some(start) = current_start {
+        spans.push((start, text.len()));
+    }
+
+    spans
+}
+
+fn best_fuzzy_word_match(text: &str, query_terms: &[String]) -> Option<(usize, usize, f32)> {
+    let mut best_match: Option<(usize, usize, f32)> = None;
+    let query_terms: Vec<&str> = query_terms
+        .iter()
+        .map(String::as_str)
+        .filter(|term| term.chars().count() >= FUZZY_QUERY_TERM_MIN_CHARS)
+        .collect();
+    if query_terms.is_empty() {
+        return None;
+    }
+
+    for (start, end) in collect_word_spans(text) {
+        let token = &text[start..end];
+        let token_lower = token.to_lowercase();
+        let token_len = token_lower.chars().count();
+        if token_len < FUZZY_QUERY_TERM_MIN_CHARS {
+            continue;
+        }
+
+        for term in &query_terms {
+            if !lengths_are_fuzzy_compatible(term.chars().count(), token_len) {
+                continue;
+            }
+
+            let score = fuzzy_term_similarity(term, &token_lower);
+            if score < FUZZY_SIMILARITY_THRESHOLD {
+                continue;
+            }
+
+            match best_match {
+                None => best_match = Some((start, end, score)),
+                Some((best_start, _, best_score)) => {
+                    if score > best_score
+                        || ((score - best_score).abs() <= f32::EPSILON && start < best_start)
+                    {
+                        best_match = Some((start, end, score));
+                    }
+                }
+            }
+        }
+    }
+
+    best_match
+}
+
+fn fuzzy_row_score(title: &str, note: &str, query_terms: &[String]) -> f32 {
+    let title_score = best_fuzzy_word_match(title, query_terms)
+        .map(|(_, _, score)| score * 1.08)
+        .unwrap_or(0.0);
+    let note_score = best_fuzzy_word_match(note, query_terms)
+        .map(|(_, _, score)| score * 0.98)
+        .unwrap_or(0.0);
+
+    title_score.max(note_score)
+}
+
+fn lengths_are_fuzzy_compatible(left: usize, right: usize) -> bool {
+    let max_len = left.max(right);
+    let min_len = left.min(right);
+    min_len.saturating_mul(2) >= max_len
+}
+
+fn fuzzy_term_similarity(query: &str, candidate: &str) -> f32 {
+    if query.is_empty() || candidate.is_empty() {
+        return 0.0;
+    }
+    if query == candidate {
+        return 1.0;
+    }
+    if candidate.contains(query) || query.contains(candidate) {
+        return 0.96;
+    }
+
+    let dice = bigram_dice_similarity(query, candidate);
+    let query_len = query.chars().count();
+    let candidate_len = candidate.chars().count();
+    let len_ratio = (query_len.min(candidate_len) as f32) / (query_len.max(candidate_len) as f32);
+    (dice * 0.85) + (len_ratio * 0.15)
+}
+
+fn bigram_dice_similarity(left: &str, right: &str) -> f32 {
+    let left_chars: Vec<char> = left.chars().collect();
+    let right_chars: Vec<char> = right.chars().collect();
+
+    if left_chars.is_empty() || right_chars.is_empty() {
+        return 0.0;
+    }
+    if left_chars.len() == 1 || right_chars.len() == 1 {
+        return if left_chars[0] == right_chars[0] {
+            1.0
+        } else {
+            0.0
+        };
+    }
+
+    let mut left_counts: HashMap<(char, char), usize> = HashMap::new();
+    let mut right_counts: HashMap<(char, char), usize> = HashMap::new();
+
+    for window in left_chars.windows(2) {
+        let key = (window[0], window[1]);
+        *left_counts.entry(key).or_insert(0) += 1;
+    }
+    for window in right_chars.windows(2) {
+        let key = (window[0], window[1]);
+        *right_counts.entry(key).or_insert(0) += 1;
+    }
+
+    let mut overlap = 0usize;
+    for (bigram, left_count) in left_counts {
+        if let Some(right_count) = right_counts.get(&bigram) {
+            overlap += left_count.min(*right_count);
+        }
+    }
+
+    let total = (left_chars.len() - 1 + right_chars.len() - 1) as f32;
+    if total <= 0.0 {
+        0.0
+    } else {
+        (2.0 * overlap as f32) / total
+    }
 }
 
 fn previous_char_boundary(text: &str, index: usize) -> usize {
@@ -747,6 +1102,22 @@ fn highlight_query_terms(text: &str, query_terms: &[String]) -> String {
     result
 }
 
+fn highlight_span(text: &str, start: usize, end: usize) -> String {
+    let start = previous_char_boundary(text, start);
+    let end = next_char_boundary(text, end.min(text.len()));
+    if start >= end || start > text.len() || end > text.len() {
+        return text.to_string();
+    }
+
+    let mut output = String::with_capacity(text.len() + 4);
+    output.push_str(&text[..start]);
+    output.push_str("**");
+    output.push_str(&text[start..end]);
+    output.push_str("**");
+    output.push_str(&text[end..]);
+    output
+}
+
 fn build_fts_query(query: &str) -> Option<String> {
     let mut terms = Vec::new();
     for token in query.split_whitespace().take(12) {
@@ -756,20 +1127,22 @@ fn build_fts_query(query: &str) -> Option<String> {
             .take(64)
             .collect();
         if !sanitized.is_empty() {
-            terms.push(format!("{sanitized}*"));
+            terms.push(format!("(title:{sanitized}* OR note:{sanitized}*)"));
         }
     }
 
     if terms.is_empty() {
         None
     } else {
-        Some(terms.join(" "))
+        Some(terms.join(" AND "))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_snippet, highlight_query_terms};
+    use super::{
+        build_snippet, fuzzy_term_similarity, highlight_query_terms, sanitize_note_for_preview,
+    };
 
     #[test]
     fn highlight_query_terms_marks_multiple_case_insensitive_matches() {
@@ -805,5 +1178,68 @@ mod tests {
         let (source, snippet) = result.expect("snippet should be present");
         assert_eq!(source, "title");
         assert!(snippet.contains("**Swift**"), "snippet was: {snippet}");
+    }
+
+    #[test]
+    fn build_snippet_fuzzy_matches_note_with_typo() {
+        let result = build_snippet("serkan", "", "", "dedektif notlar", "ededek");
+        let (source, snippet) = result.expect("snippet should be present");
+        assert_eq!(source, "note");
+        assert!(snippet.contains("**dedektif**"), "snippet was: {snippet}");
+    }
+
+    #[test]
+    fn fuzzy_similarity_scores_typo_reasonably_high() {
+        let score = fuzzy_term_similarity("ededek", "dedektif");
+        assert!(
+            score >= 0.62,
+            "expected fuzzy score to clear threshold, got {score}"
+        );
+    }
+
+    #[test]
+    fn sanitize_note_for_preview_removes_inline_image_refs_and_flattens_newlines() {
+        let note = "line 1\n![image](alfred://image/img-1-aaaa?w=360)\nline 2";
+        let sanitized = sanitize_note_for_preview(note);
+        assert_eq!(sanitized, "line 1 line 2");
+    }
+
+    #[test]
+    fn sanitize_note_for_preview_drops_image_url_fragments() {
+        let note = "...\n-387e204f?w=360)\n\ndeneme\n";
+        let sanitized = sanitize_note_for_preview(note);
+        assert_eq!(sanitized, "... deneme");
+    }
+
+    #[test]
+    fn build_snippet_note_preview_keeps_highlight_visible_after_newlines() {
+        let result = build_snippet(
+            "Search Docs",
+            "",
+            "",
+            "ciddiye almas dsf sdfsdf\n\ndeneme\n\n![image](alfred://image/img-1-aaaa?w=360)",
+            "deneme",
+        );
+
+        let (source, snippet) = result.expect("snippet should be present");
+        assert_eq!(source, "note");
+        assert!(snippet.contains("**deneme**"), "snippet was: {snippet}");
+        assert!(
+            !snippet.contains("alfred://image"),
+            "snippet was: {snippet}"
+        );
+        assert!(!snippet.contains("?w=360"), "snippet was: {snippet}");
+        assert!(!snippet.contains('\n'), "snippet was: {snippet}");
+    }
+
+    #[test]
+    fn build_snippet_note_preview_handles_spotify_like_images() {
+        let note = "asdfasfasdf\n\n![image](alfred://image/img-1770450073-387e204f?w=360)\n![image](alfred://image/img-1770450075-4f23d5c0)\n![image](alfred://image/img-1770450073-387e204f?w=360)\ndeneme\nkiymetli hocam\n";
+        let result = build_snippet("Spotify", "", "", note, "eneme");
+
+        let (_source, snippet) = result.expect("snippet should be present");
+        assert!(snippet.contains("**eneme**"), "snippet was: {snippet}");
+        assert!(!snippet.contains("?w=360"), "snippet was: {snippet}");
+        assert!(!snippet.contains("387e204f"), "snippet was: {snippet}");
     }
 }

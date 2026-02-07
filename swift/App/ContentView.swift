@@ -107,15 +107,9 @@ struct ContentView: View {
             .background(Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255, opacity: 252 / 255))
             .overlay(
                 RoundedRectangle(cornerRadius: launcherSearchFieldCornerRadius, style: .continuous)
-                    .stroke(
-                        viewModel.isSearching
-                            ? Color(red: 70 / 255, green: 130 / 255, blue: 210 / 255, opacity: 0.75)
-                            : Color.clear,
-                        lineWidth: 1.5
-                    )
+                    .stroke(Color.black.opacity(0.12), lineWidth: 1)
             )
             .clipShape(RoundedRectangle(cornerRadius: launcherSearchFieldCornerRadius, style: .continuous))
-            .animation(.spring(response: 0.28, dampingFraction: 0.78), value: viewModel.isSearching)
 
             if let errorMessage = viewModel.errorMessage {
                 Text("Error: \(errorMessage)")
@@ -314,24 +308,10 @@ private struct ResultRow: View {
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(isSelected ? Color(white: 20 / 255) : Color(white: 35 / 255))
 
-                if !item.subtitle.isEmpty {
-                    Text(item.subtitle)
-                        .font(.system(size: 14))
-                        .foregroundStyle(Color(white: 85 / 255))
-                }
-
-                if let snippet = item.snippet, !snippet.isEmpty {
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        if let source = item.snippetSource {
-                            Text("\(source):")
-                                .font(.system(size: 12))
-                                .foregroundStyle(Color(white: 95 / 255))
-                        }
-
-                        Text(attributedSnippet(snippet))
-                            .font(.system(size: 12))
-                            .lineLimit(2)
-                    }
+                if let snippet = visibleSnippet {
+                    Text(attributedSnippet(snippet))
+                        .font(.system(size: 12))
+                        .lineLimit(2)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -364,6 +344,30 @@ private struct ResultRow: View {
         }
 
         return result
+    }
+
+    private var visibleSnippet: String? {
+        guard let snippet = item.snippet else {
+            return nil
+        }
+
+        let trimmed = snippet.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+
+        let withoutEllipsis = trimmed
+            .replacingOccurrences(of: "...", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !withoutEllipsis.isEmpty else {
+            return nil
+        }
+
+        guard trimmed.contains("**") else {
+            return nil
+        }
+
+        return trimmed
     }
 
     private func snippetSegments(_ snippet: String) -> [(text: String, isHighlight: Bool)] {
