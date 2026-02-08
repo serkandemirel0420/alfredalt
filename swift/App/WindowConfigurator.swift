@@ -67,19 +67,22 @@ struct WindowConfigurator: NSViewRepresentable {
         }
         coordinator.appliedSize = targetSize
 
+        let currentMaxY = window.frame.maxY
+        let targetFrameSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetSize)).size
+
         window.minSize = targetSize
         window.maxSize = targetSize
-        let targetFrameSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetSize)).size
-        let currentFrameSize = window.frame.size
-        if abs(currentFrameSize.width - targetFrameSize.width) <= 0.5,
-           abs(currentFrameSize.height - targetFrameSize.height) <= 0.5 {
-            return
-        }
 
         var frame = window.frame
-        let currentMaxY = frame.maxY
         frame.size = targetFrameSize
         frame.origin.y = currentMaxY - frame.height
+
+        let currentFrame = window.frame
+        if abs(currentFrame.width - frame.width) <= 0.5,
+           abs(currentFrame.height - frame.height) <= 0.5,
+           abs(currentFrame.origin.y - frame.origin.y) <= 0.5 {
+            return
+        }
         window.setFrame(frame, display: false, animate: false)
     }
 }

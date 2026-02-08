@@ -32,37 +32,40 @@ struct ContentView: View {
     }
 
     var body: some View {
-        launcherShell(width: launcherWindowWidth)
-            .background(
-                GeometryReader { proxy in
-                    Color.clear.preference(
-                        key: LauncherShellHeightPreferenceKey.self,
-                        value: ceil(proxy.size.height)
-                    )
-                }
-            )
-            .frame(width: launcherWindowWidth)
-            .background(Color.clear)
-            .background(
-                WindowConfigurator(
-                    desiredSize: NSSize(width: launcherWindowWidth, height: measuredShellHeight)
-                ) { window in
-                    viewModel.registerLauncherWindow(window)
-                }
-            )
-            .background(
-                KeyEventMonitor { event in
-                    if viewModel.isEditorPresented {
-                        return false
+        VStack(spacing: 0) {
+            launcherShell(width: launcherWindowWidth)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: LauncherShellHeightPreferenceKey.self,
+                            value: ceil(proxy.size.height)
+                        )
                     }
-                    return handleLauncherKeyEvent(event)
-                }
-            )
-            .onPreferenceChange(LauncherShellHeightPreferenceKey.self) { value in
-                if abs(measuredShellHeight - value) > 0.5 {
-                    measuredShellHeight = value
-                }
+                )
+        }
+        .frame(width: launcherWindowWidth)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color.clear)
+        .background(
+            WindowConfigurator(
+                desiredSize: NSSize(width: launcherWindowWidth, height: measuredShellHeight)
+            ) { window in
+                viewModel.registerLauncherWindow(window)
             }
+        )
+        .background(
+            KeyEventMonitor { event in
+                if viewModel.isEditorPresented {
+                    return false
+                }
+                return handleLauncherKeyEvent(event)
+            }
+        )
+        .onPreferenceChange(LauncherShellHeightPreferenceKey.self) { value in
+            if abs(measuredShellHeight - value) > 0.5 {
+                measuredShellHeight = value
+            }
+        }
         .onAppear {
             searchFieldFocused = true
         }
