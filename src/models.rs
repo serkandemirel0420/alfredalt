@@ -1,25 +1,4 @@
 #[derive(Debug, Clone)]
-pub struct Item {
-    pub title: String,
-    pub subtitle: String,
-    pub keywords: String,
-}
-
-impl Item {
-    pub fn new(
-        title: impl Into<String>,
-        subtitle: impl Into<String>,
-        keywords: impl Into<String>,
-    ) -> Self {
-        Self {
-            title: title.into(),
-            subtitle: subtitle.into(),
-            keywords: keywords.into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct SearchResult {
     pub id: i64,
     pub title: String,

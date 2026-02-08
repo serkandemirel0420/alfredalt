@@ -7,6 +7,7 @@ struct WindowConfigurator: NSViewRepresentable {
 
     final class Coordinator {
         var configured = false
+        var appliedSize: NSSize?
     }
 
     func makeCoordinator() -> Coordinator {
@@ -29,8 +30,6 @@ struct WindowConfigurator: NSViewRepresentable {
     private func configure(window: NSWindow, coordinator: Coordinator) {
         if !coordinator.configured {
             coordinator.configured = true
-            window.minSize = desiredSize
-            window.maxSize = desiredSize
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.isOpaque = false
@@ -60,14 +59,16 @@ struct WindowConfigurator: NSViewRepresentable {
             }
         }
 
-        window.minSize = desiredSize
-        window.maxSize = desiredSize
-        window.hasShadow = false
-        window.isMovable = false
-        window.isMovableByWindowBackground = false
-        window.backgroundColor = .clear
-
         let targetSize = desiredSize
+        if let appliedSize = coordinator.appliedSize,
+           abs(appliedSize.width - targetSize.width) <= 0.5,
+           abs(appliedSize.height - targetSize.height) <= 0.5 {
+            return
+        }
+        coordinator.appliedSize = targetSize
+
+        window.minSize = targetSize
+        window.maxSize = targetSize
         let targetFrameSize = window.frameRect(forContentRect: NSRect(origin: .zero, size: targetSize)).size
         let currentFrameSize = window.frame.size
         if abs(currentFrameSize.width - targetFrameSize.width) <= 0.5,

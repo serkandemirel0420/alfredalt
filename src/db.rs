@@ -1,25 +1,39 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, anyhow, ensure};
 use directories::ProjectDirs;
-use once_cell::sync::{Lazy, OnceCell};
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, params};
-use serde::Serialize;
+use once_cell::sync::OnceCell;
+use serde::{Deserialize, Serialize};
+use tantivy::collector::TopDocs;
+use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, TermQuery};
+use tantivy::schema::{Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TEXT, Value};
+use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument, Term, doc};
 
-use crate::models::{EditableItem, Item, NoteImage, SearchResult};
+use crate::models::{EditableItem, NoteImage, SearchResult};
 
-static DB: OnceCell<Mutex<Connection>> = OnceCell::new();
+static STORE: OnceCell<Mutex<Store>> = OnceCell::new();
 pub const MAX_SCREENSHOT_BYTES: usize = 12_000_000;
 pub const MAX_NOTE_IMAGE_COUNT: usize = 24;
 pub const DEFAULT_HOTKEY: &str = "super+Space";
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+const HOTKEY_SETTING_KEY: &str = "launcher_hotkey";
 const FUZZY_QUERY_TERM_MIN_CHARS: usize = 4;
 const FUZZY_SIMILARITY_THRESHOLD: f32 = 0.62;
 const FUZZY_SCAN_MULTIPLIER: i64 = 64;
 const FUZZY_SCAN_MAX_ROWS: i64 = 2048;
+const INDEX_DIR_NAME: &str = "alfred_lucene_index";
+const LEGACY_INDEX_DIR_NAME: &str = "alfred_search_index";
+const LEGACY_DATA_FILE_NAME: &str = "alfred_store.json";
+const LEGACY_DATA_TMP_FILE_NAME: &str = "alfred_store.json.tmp";
+const LEGACY_DB_FILE_NAME: &str = "alfred.db";
+const LEGACY_DB_WAL_FILE_NAME: &str = "alfred.db-wal";
+const LEGACY_DB_SHM_FILE_NAME: &str = "alfred.db-shm";
+const INDEX_WRITER_HEAP_BYTES: usize = 50_000_000;
+const DOC_TYPE_ITEM: &str = "item";
+const DOC_TYPE_SETTING: &str = "setting";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExportItem {
@@ -31,104 +45,478 @@ pub struct ExportItem {
     pub image_count: i64,
 }
 
-static SAMPLE_DATA: Lazy<Vec<Item>> = Lazy::new(|| {
-    vec![
-        Item::new("Serkan Demirel", "Engineer", "rust,search,cli"),
-        Item::new("Search Docs", "Open rust docs", "rust,docs,book"),
-        Item::new("GitHub", "Open GitHub homepage", "code,hosting"),
-        Item::new("Stack Overflow", "Programming Q&A", "questions,answers"),
-        Item::new("Spotify", "Play some music", "music,audio"),
-    ]
-});
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedImage {
+    image_key: String,
+    bytes: Vec<u8>,
+}
 
-fn db_path() -> Result<std::path::PathBuf> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedItem {
+    id: i64,
+    title: String,
+    subtitle: String,
+    keywords: String,
+    note: String,
+    images: Vec<PersistedImage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PersistedData {
+    next_item_id: i64,
+    settings: HashMap<String, String>,
+    items: BTreeMap<i64, PersistedItem>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SearchFields {
+    doc_type: Field,
+    id: Field,
+    title: Field,
+    subtitle: Field,
+    keywords: Field,
+    note: Field,
+    images_json: Field,
+    setting_key: Field,
+    setting_value: Field,
+}
+
+struct Store {
+    data: PersistedData,
+    index: Index,
+    writer: IndexWriter,
+    reader: IndexReader,
+    fields: SearchFields,
+}
+
+fn project_data_dir() -> Result<PathBuf> {
     let proj =
         ProjectDirs::from("com", "Codex", "alfred_alt").context("Cannot determine project dirs")?;
-    Ok(proj.data_dir().join("alfred.db"))
+    Ok(proj.data_dir().to_path_buf())
 }
 
-fn create_connection() -> Result<Connection> {
-    let path = db_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
-    )?;
-    conn.pragma_update(None, "journal_mode", &"WAL")?;
-    conn.pragma_update(None, "synchronous", &"NORMAL")?;
-    conn.pragma_update(None, "temp_store", &"MEMORY")?;
-    conn.pragma_update(None, "cache_size", &-12_000i32)?;
-    conn.pragma_update(None, "foreign_keys", &"ON")?;
-    conn.busy_timeout(std::time::Duration::from_millis(300))?;
-    conn.set_prepared_statement_cache_capacity(64);
-    Ok(conn)
+fn index_path() -> Result<PathBuf> {
+    Ok(project_data_dir()?.join(INDEX_DIR_NAME))
 }
 
-fn get_db() -> Result<&'static Mutex<Connection>> {
-    DB.get_or_try_init(|| {
-        let mut conn = create_connection()?;
-        if let Err(err) = setup_schema(&mut conn) {
-            if is_corruption_error(&err) {
-                recover_connection(&mut conn)?;
-            } else {
-                return Err(err);
-            }
-        }
-        Ok(Mutex::new(conn))
+fn get_store() -> Result<&'static Mutex<Store>> {
+    STORE.get_or_try_init(|| {
+        let mut store = Store::open()?;
+        store.ensure_seed_data();
+        store.flush_all()?;
+        Ok(Mutex::new(store))
     })
 }
 
-fn run_with_recovery<T, F>(mut operation: F) -> Result<T>
+fn run_with_store<T, F>(mut operation: F) -> Result<T>
 where
-    F: FnMut(&Connection) -> Result<T>,
+    F: FnMut(&mut Store) -> Result<T>,
 {
-    let db = get_db()?;
-    let mut conn = db.lock().unwrap();
-    match operation(&conn) {
-        Ok(value) => Ok(value),
-        Err(err) if is_corruption_error(&err) => {
-            recover_connection(&mut conn)?;
-            operation(&conn)
+    let store = get_store()?;
+    let mut guard = store.lock().unwrap();
+    operation(&mut guard)
+}
+
+impl Store {
+    fn open() -> Result<Self> {
+        let data_dir = project_data_dir()?;
+        std::fs::create_dir_all(&data_dir)?;
+        purge_legacy_storage_files(&data_dir)?;
+
+        let index_path = index_path()?;
+        let (index, fields) = open_or_rebuild_index(&index_path)?;
+        let writer = index
+            .writer(INDEX_WRITER_HEAP_BYTES)
+            .context("failed to create Lucene writer")?;
+        let reader = index.reader().context("failed to create Lucene reader")?;
+        let mut data = load_data_from_lucene(&reader, &fields)?;
+        if data.next_item_id <= 0 {
+            data.next_item_id = 1;
         }
-        Err(err) => Err(err),
+
+        Ok(Self {
+            data,
+            index,
+            writer,
+            reader,
+            fields,
+        })
+    }
+
+    fn ensure_seed_data(&mut self) {
+        self.data
+            .settings
+            .entry(HOTKEY_SETTING_KEY.to_string())
+            .or_insert_with(|| DEFAULT_HOTKEY.to_string());
+    }
+
+    fn flush_all(&mut self) -> Result<()> {
+        self.rebuild_index()
+    }
+
+    fn rebuild_index(&mut self) -> Result<()> {
+        self.writer
+            .delete_all_documents()
+            .context("failed to clear Lucene index")?;
+
+        for item in self.data.items.values() {
+            self.writer
+                .add_document(self.build_item_document(item))
+                .context("failed to add Lucene item document")?;
+        }
+
+        for (key, value) in &self.data.settings {
+            self.writer
+                .add_document(self.build_setting_document(key, value))
+                .context("failed to add Lucene setting document")?;
+        }
+
+        self.writer
+            .commit()
+            .context("failed to commit Lucene index")?;
+        self.reader
+            .reload()
+            .context("failed to reload Lucene reader")?;
+        Ok(())
+    }
+
+    fn build_item_document(&self, item: &PersistedItem) -> TantivyDocument {
+        let images_json = serde_json::to_string(&item.images).unwrap_or_else(|_| "[]".to_string());
+        doc!(
+            self.fields.doc_type => DOC_TYPE_ITEM,
+            self.fields.id => item.id,
+            self.fields.title => item.title.clone(),
+            self.fields.subtitle => item.subtitle.clone(),
+            self.fields.keywords => item.keywords.clone(),
+            self.fields.note => item.note.clone(),
+            self.fields.images_json => images_json
+        )
+    }
+
+    fn build_setting_document(&self, key: &str, value: &str) -> TantivyDocument {
+        doc!(
+            self.fields.doc_type => DOC_TYPE_SETTING,
+            self.fields.setting_key => key.to_string(),
+            self.fields.setting_value => value.to_string()
+        )
+    }
+
+    fn next_item_id(&mut self) -> i64 {
+        let id = self.data.next_item_id.max(1);
+        self.data.next_item_id = id.saturating_add(1);
+        id
+    }
+
+    fn item_by_id(&self, id: i64) -> Option<&PersistedItem> {
+        self.data.items.get(&id)
+    }
+
+    fn item_by_id_mut(&mut self, id: i64) -> Option<&mut PersistedItem> {
+        self.data.items.get_mut(&id)
+    }
+
+    fn ordered_items_for_listing(&self) -> Vec<&PersistedItem> {
+        let mut items: Vec<&PersistedItem> = self.data.items.values().collect();
+        items.sort_by(|left, right| {
+            left.title
+                .to_lowercase()
+                .cmp(&right.title.to_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        items
+    }
+
+    fn ordered_items_by_id_asc(&self) -> Vec<&PersistedItem> {
+        self.data.items.values().collect()
+    }
+
+    fn ordered_items_by_id_desc(&self) -> Vec<&PersistedItem> {
+        self.data.items.values().rev().collect()
+    }
+
+    fn lucene_search_ids(&mut self, query: &str, limit: usize) -> Result<Vec<i64>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let Some(lucene_query) = build_lucene_query(query) else {
+            return Ok(Vec::new());
+        };
+
+        self.reader
+            .reload()
+            .context("failed to refresh Lucene reader")?;
+        let searcher = self.reader.searcher();
+
+        let mut parser = QueryParser::for_index(
+            &self.index,
+            vec![
+                self.fields.title,
+                self.fields.subtitle,
+                self.fields.keywords,
+                self.fields.note,
+            ],
+        );
+        parser.set_conjunction_by_default();
+
+        let text_query = match parser.parse_query(&lucene_query) {
+            Ok(query) => query,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let item_filter = TermQuery::new(
+            Term::from_field_text(self.fields.doc_type, DOC_TYPE_ITEM),
+            IndexRecordOption::Basic,
+        );
+        let query = BooleanQuery::new(vec![
+            (Occur::Must, Box::new(item_filter)),
+            (Occur::Must, text_query),
+        ]);
+
+        let top_docs = searcher
+            .search(&query, &TopDocs::with_limit(limit))
+            .context("failed to execute Lucene search")?;
+
+        let mut ids = Vec::with_capacity(top_docs.len());
+        for (_, addr) in top_docs {
+            let doc: TantivyDocument = searcher
+                .doc(addr)
+                .context("failed to load Lucene document")?;
+            if let Some(id) = doc
+                .get_first(self.fields.id)
+                .and_then(|value| value.as_i64())
+            {
+                ids.push(id);
+            }
+        }
+
+        Ok(ids)
     }
 }
 
-fn recover_connection(conn: &mut Connection) -> Result<()> {
-    let path = db_path()?;
-    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
-    let old = std::mem::replace(conn, Connection::open_in_memory()?);
-    drop(old);
-    backup_corrupt_db_files(&path)?;
-    let mut new_conn = create_connection()?;
-    setup_schema(&mut new_conn)?;
-    *conn = new_conn;
-    Ok(())
+fn open_or_rebuild_index(path: &Path) -> Result<(Index, SearchFields)> {
+    if path.exists() {
+        match Index::open_in_dir(path) {
+            Ok(index) => {
+                if let Some(fields) = resolve_fields(&index.schema()) {
+                    return Ok((index, fields));
+                }
+            }
+            Err(_) => {}
+        }
+
+        backup_corrupt_path(path)?;
+    }
+
+    std::fs::create_dir_all(path)?;
+    let (schema, fields) = build_index_schema();
+    let index = Index::create_in_dir(path, schema)?;
+    Ok((index, fields))
 }
 
-fn backup_corrupt_db_files(db_file: &std::path::Path) -> Result<()> {
-    let stamp = unix_timestamp();
-    for file in [
-        db_file.to_path_buf(),
-        std::path::PathBuf::from(format!("{}-wal", db_file.display())),
-        std::path::PathBuf::from(format!("{}-shm", db_file.display())),
+fn build_index_schema() -> (Schema, SearchFields) {
+    let mut builder = Schema::builder();
+    let doc_type = builder.add_text_field("doc_type", STRING | STORED);
+    let id = builder.add_i64_field("id", INDEXED | STORED);
+    let title = builder.add_text_field("title", TEXT | STORED);
+    let subtitle = builder.add_text_field("subtitle", TEXT | STORED);
+    let keywords = builder.add_text_field("keywords", TEXT | STORED);
+    let note = builder.add_text_field("note", TEXT | STORED);
+    let images_json = builder.add_text_field("images_json", STORED);
+    let setting_key = builder.add_text_field("setting_key", STRING | STORED);
+    let setting_value = builder.add_text_field("setting_value", STORED);
+    let schema = builder.build();
+
+    (
+        schema,
+        SearchFields {
+            doc_type,
+            id,
+            title,
+            subtitle,
+            keywords,
+            note,
+            images_json,
+            setting_key,
+            setting_value,
+        },
+    )
+}
+
+fn resolve_fields(schema: &Schema) -> Option<SearchFields> {
+    Some(SearchFields {
+        doc_type: schema.get_field("doc_type").ok()?,
+        id: schema.get_field("id").ok()?,
+        title: schema.get_field("title").ok()?,
+        subtitle: schema.get_field("subtitle").ok()?,
+        keywords: schema.get_field("keywords").ok()?,
+        note: schema.get_field("note").ok()?,
+        images_json: schema.get_field("images_json").ok()?,
+        setting_key: schema.get_field("setting_key").ok()?,
+        setting_value: schema.get_field("setting_value").ok()?,
+    })
+}
+
+fn load_data_from_lucene(reader: &IndexReader, fields: &SearchFields) -> Result<PersistedData> {
+    reader
+        .reload()
+        .context("failed to refresh Lucene reader while loading data")?;
+    let searcher = reader.searcher();
+    let total_docs = searcher.num_docs().max(1) as usize;
+
+    let docs = searcher
+        .search(&AllQuery, &TopDocs::with_limit(total_docs))
+        .context("failed to scan Lucene documents")?;
+
+    let mut data = PersistedData::default();
+
+    for (_, addr) in docs {
+        let doc: TantivyDocument = searcher
+            .doc(addr)
+            .context("failed to read Lucene document while loading data")?;
+
+        let doc_type = doc
+            .get_first(fields.doc_type)
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+
+        match doc_type {
+            DOC_TYPE_ITEM => {
+                let Some(id) = doc.get_first(fields.id).and_then(|value| value.as_i64()) else {
+                    continue;
+                };
+
+                let title = doc
+                    .get_first(fields.title)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let subtitle = doc
+                    .get_first(fields.subtitle)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let keywords = doc
+                    .get_first(fields.keywords)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let note = doc
+                    .get_first(fields.note)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let images_json = doc
+                    .get_first(fields.images_json)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("[]");
+                let images = serde_json::from_str::<Vec<PersistedImage>>(images_json)
+                    .unwrap_or_else(|_| Vec::new());
+
+                data.items.insert(
+                    id,
+                    PersistedItem {
+                        id,
+                        title,
+                        subtitle,
+                        keywords,
+                        note,
+                        images,
+                    },
+                );
+                data.next_item_id = data.next_item_id.max(id.saturating_add(1));
+            }
+            DOC_TYPE_SETTING => {
+                let Some(key) = doc
+                    .get_first(fields.setting_key)
+                    .and_then(|value| value.as_str())
+                else {
+                    continue;
+                };
+                let value = doc
+                    .get_first(fields.setting_value)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                data.settings.insert(key.to_string(), value);
+            }
+            _ => {}
+        }
+    }
+
+    if data.next_item_id <= 0 {
+        data.next_item_id = 1;
+    }
+
+    Ok(data)
+}
+
+fn purge_legacy_storage_files(data_dir: &Path) -> Result<()> {
+    for filename in [
+        LEGACY_DATA_FILE_NAME,
+        LEGACY_DATA_TMP_FILE_NAME,
+        LEGACY_DB_FILE_NAME,
+        LEGACY_DB_WAL_FILE_NAME,
+        LEGACY_DB_SHM_FILE_NAME,
     ] {
-        if file.exists() {
-            let backup = std::path::PathBuf::from(format!("{}.corrupt.{stamp}", file.display()));
-            std::fs::rename(&file, &backup).with_context(|| {
-                format!(
-                    "failed to move corrupt database file from {} to {}",
-                    file.display(),
-                    backup.display()
-                )
+        let path = data_dir.join(filename);
+        if !path.exists() {
+            continue;
+        }
+
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+                .with_context(|| format!("failed removing legacy directory {}", path.display()))?;
+        } else {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed removing legacy file {}", path.display()))?;
+        }
+    }
+
+    let legacy_index_dir = data_dir.join(LEGACY_INDEX_DIR_NAME);
+    if legacy_index_dir.exists() {
+        std::fs::remove_dir_all(&legacy_index_dir).with_context(|| {
+            format!(
+                "failed removing legacy index directory {}",
+                legacy_index_dir.display()
+            )
+        })?;
+    }
+
+    for entry in std::fs::read_dir(data_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+
+        if name.starts_with("alfred.db.corrupt.") || name.starts_with("alfred_store.json.corrupt.")
+        {
+            std::fs::remove_file(&path).with_context(|| {
+                format!("failed removing legacy backup file {}", path.display())
             })?;
         }
     }
+
+    Ok(())
+}
+
+fn backup_corrupt_path(path: &Path) -> Result<()> {
+    let stamp = unix_timestamp();
+    let backup = PathBuf::from(format!("{}.corrupt.{stamp}", path.display()));
+    std::fs::rename(path, &backup).with_context(|| {
+        format!(
+            "failed to move corrupt storage from {} to {}",
+            path.display(),
+            backup.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -139,308 +527,86 @@ fn unix_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
-fn is_corruption_error(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        if let Some(sql_err) = cause.downcast_ref::<rusqlite::Error>() {
-            return matches!(
-                sql_err,
-                rusqlite::Error::SqliteFailure(code, _)
-                    if code.code == ErrorCode::DatabaseCorrupt
-                        || code.code == ErrorCode::NotADatabase
-            );
-        }
-
-        let msg = cause.to_string().to_lowercase();
-        msg.contains("database disk image is malformed")
-    })
-}
-
-fn setup_schema(conn: &mut Connection) -> Result<()> {
-    apply_migrations(conn)?;
-
-    // Seed a few rows if empty.
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?;
-    if count == 0 {
-        let tx = conn.transaction()?;
-        {
-            let mut stmt =
-                tx.prepare("INSERT INTO items(title, subtitle, keywords) VALUES (?1, ?2, ?3)")?;
-            for item in SAMPLE_DATA.iter() {
-                stmt.execute(params![item.title, item.subtitle, item.keywords])?;
-            }
-        }
-        tx.commit()?;
-    }
-
-    ensure_default_hotkey(conn)?;
-    Ok(())
-}
-
-fn apply_migrations(conn: &mut Connection) -> Result<()> {
-    create_schema_version_table(conn)?;
-    let mut version = get_schema_version(conn)?;
-
-    while version < CURRENT_SCHEMA_VERSION {
-        let target = version + 1;
-        let tx = conn.transaction()?;
-        match target {
-            1 => migrate_to_v1(&tx)?,
-            2 => migrate_to_v2(&tx)?,
-            3 => migrate_to_v3(&tx)?,
-            4 => migrate_to_v4(&tx)?,
-            _ => unreachable!("unsupported schema version migration: {target}"),
-        }
-        set_schema_version(&tx, target)?;
-        tx.commit()?;
-        version = target;
-    }
-
-    Ok(())
-}
-
-fn create_schema_version_table(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS schema_version (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            version INTEGER NOT NULL
-        );
-        "#,
-    )?;
-    Ok(())
-}
-
-fn get_schema_version(conn: &Connection) -> Result<i64> {
-    Ok(conn
-        .query_row(
-            "SELECT version FROM schema_version WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0))
-}
-
-fn set_schema_version(tx: &Transaction<'_>, version: i64) -> Result<()> {
-    tx.execute(
-        "INSERT INTO schema_version(id, version) VALUES (1, ?1)
-         ON CONFLICT(id) DO UPDATE SET version = excluded.version",
-        [version],
-    )?;
-    Ok(())
-}
-
-fn migrate_to_v1(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY,
-            title TEXT NOT NULL,
-            subtitle TEXT DEFAULT '',
-            keywords TEXT DEFAULT ''
-        );
-
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        "#,
-    )?;
-    Ok(())
-}
-
-fn migrate_to_v2(tx: &Transaction<'_>) -> Result<()> {
-    // Add new columns if they are missing; ignore errors if already present.
-    let _ = tx.execute("ALTER TABLE items ADD COLUMN note TEXT DEFAULT ''", []);
-    let _ = tx.execute("ALTER TABLE items ADD COLUMN screenshot BLOB", []);
-    Ok(())
-}
-
-fn migrate_to_v3(tx: &Transaction<'_>) -> Result<()> {
-    // Rebuild FTS/indexing triggers once when moving to schema v3.
-    tx.execute_batch(
-        r#"
-        DROP TRIGGER IF EXISTS items_ai;
-        DROP TRIGGER IF EXISTS items_ad;
-        DROP TRIGGER IF EXISTS items_au;
-        DROP TABLE IF EXISTS items_fts;
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(
-            title, subtitle, keywords, note, content='items', content_rowid='id'
-        );
-
-        CREATE TRIGGER IF NOT EXISTS items_ai AFTER INSERT ON items BEGIN
-            INSERT INTO items_fts(rowid, title, subtitle, keywords, note)
-            VALUES (new.id, new.title, new.subtitle, new.keywords, COALESCE(new.note, ''));
-        END;
-        CREATE TRIGGER IF NOT EXISTS items_ad AFTER DELETE ON items BEGIN
-            INSERT INTO items_fts(items_fts, rowid, title, subtitle, keywords, note)
-            VALUES('delete', old.id, old.title, old.subtitle, old.keywords, COALESCE(old.note, ''));
-        END;
-        CREATE TRIGGER IF NOT EXISTS items_au AFTER UPDATE ON items BEGIN
-            INSERT INTO items_fts(items_fts, rowid, title, subtitle, keywords, note)
-            VALUES('delete', old.id, old.title, old.subtitle, old.keywords, COALESCE(old.note, ''));
-            INSERT INTO items_fts(rowid, title, subtitle, keywords, note)
-            VALUES (new.id, new.title, new.subtitle, new.keywords, COALESCE(new.note, ''));
-        END;
-        "#,
-    )?;
-
-    tx.execute(
-        "INSERT INTO items_fts(rowid, title, subtitle, keywords, note)
-         SELECT id, title, subtitle, keywords, COALESCE(note, '') FROM items",
-        [],
-    )?;
-    Ok(())
-}
-
-fn migrate_to_v4(tx: &Transaction<'_>) -> Result<()> {
-    tx.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS item_images (
-            id INTEGER PRIMARY KEY,
-            item_id INTEGER NOT NULL,
-            image_key TEXT NOT NULL,
-            image BLOB NOT NULL,
-            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-            UNIQUE(item_id, image_key),
-            FOREIGN KEY(item_id) REFERENCES items(id) ON DELETE CASCADE
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_item_images_item_id ON item_images(item_id);
-        "#,
-    )?;
-
-    // Backfill legacy single-image data into the new attachment table.
-    tx.execute(
-        r#"
-        INSERT INTO item_images(item_id, image_key, image)
-        SELECT id, 'legacy-main', screenshot
-        FROM items
-        WHERE screenshot IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM item_images
-              WHERE item_images.item_id = items.id
-                AND item_images.image_key = 'legacy-main'
-          )
-        "#,
-        [],
-    )?;
-
-    Ok(())
-}
-
-const HOTKEY_SETTING_KEY: &str = "launcher_hotkey";
-
-fn ensure_default_hotkey(conn: &Connection) -> Result<()> {
-    let existing: Option<String> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = ?1",
-            [HOTKEY_SETTING_KEY],
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    if existing.is_none() {
-        set_setting(conn, HOTKEY_SETTING_KEY, DEFAULT_HOTKEY)?;
-    }
-    Ok(())
-}
-
-fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
-    conn.execute(
-        "INSERT INTO settings(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    )?;
-    Ok(())
-}
-
-fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
-    Ok(conn
-        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
-            row.get(0)
-        })
-        .optional()?)
-}
-
 pub fn load_hotkey_setting() -> Result<String> {
-    run_with_recovery(|conn| {
-        if let Some(value) = get_setting(conn, HOTKEY_SETTING_KEY)? {
-            Ok(value)
-        } else {
-            Ok(DEFAULT_HOTKEY.to_string())
-        }
+    run_with_store(|store| {
+        Ok(store
+            .data
+            .settings
+            .get(HOTKEY_SETTING_KEY)
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_HOTKEY.to_string()))
     })
 }
 
 pub fn save_hotkey_setting(value: &str) -> Result<()> {
-    run_with_recovery(|conn| set_setting(conn, HOTKEY_SETTING_KEY, value))
+    run_with_store(|store| {
+        store
+            .data
+            .settings
+            .insert(HOTKEY_SETTING_KEY.to_string(), value.to_string());
+        store.flush_all()
+    })
 }
 
 pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
-    run_with_recovery(|conn| {
+    run_with_store(|store| {
+        let limit = limit.max(0);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
         let query = query.trim();
         if query.is_empty() {
-            let mut stmt = conn
-                .prepare_cached("SELECT id, title, subtitle FROM items ORDER BY title LIMIT ?1")?;
-            let rows = stmt
-                .query_map([limit], |row| {
-                    Ok(SearchResult {
-                        id: row.get(0)?,
-                        title: row.get(1)?,
-                        subtitle: row.get(2)?,
-                        snippet: None,
-                        snippet_source: None,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let rows = store
+                .ordered_items_for_listing()
+                .into_iter()
+                .take(limit as usize)
+                .map(|item| SearchResult {
+                    id: item.id,
+                    title: item.title.clone(),
+                    subtitle: item.subtitle.clone(),
+                    snippet: None,
+                    snippet_source: None,
+                })
+                .collect();
             return Ok(rows);
         }
 
-        // First try FTS prefix match, then LIKE substring hits, and finally a fuzzy fallback.
         let query_terms = parse_query_terms(query);
-        let mut results = Vec::with_capacity(limit.max(0) as usize);
-        let mut seen_ids = HashSet::with_capacity(limit.max(0) as usize);
+        let mut results = Vec::with_capacity(limit as usize);
+        let mut seen_ids = HashSet::with_capacity(limit as usize);
 
-        if let Some(fts_query) = build_fts_query(query) {
-            let mut stmt = conn.prepare_cached(
-                "SELECT items.id, items.title, items.subtitle, items.note, items.keywords
-             FROM items_fts
-             JOIN items ON items.id = items_fts.rowid
-             WHERE items_fts MATCH ?1
-             ORDER BY bm25(items_fts)
-             LIMIT ?2",
-            )?;
-            let rows = stmt
-                .query_map(params![fts_query, limit], |row| {
-                    map_search_row(row, &query_terms)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for row in rows {
-                if seen_ids.insert(row.id) {
-                    results.push(row);
-                }
+        let lucene_ids = store.lucene_search_ids(query, limit as usize)?;
+        for id in lucene_ids {
+            if !seen_ids.insert(id) {
+                continue;
+            }
+
+            let Some(item) = store.item_by_id(id) else {
+                continue;
+            };
+
+            results.push(map_search_item(item, &query_terms));
+            if results.len() as i64 >= limit {
+                return Ok(results);
             }
         }
 
         if (results.len() as i64) < limit {
-            let remaining = limit - results.len() as i64;
-            let mut stmt = conn.prepare_cached(
-                r#"SELECT id, title, subtitle, note, keywords FROM items
-               WHERE title LIKE '%' || ?1 || '%'
-                  OR note LIKE '%' || ?1 || '%'
-               LIMIT ?2"#,
-            )?;
-            let rows = stmt
-                .query_map(params![query, remaining], |row| {
-                    map_search_row(row, &query_terms)
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for r in rows {
-                if seen_ids.insert(r.id) {
-                    results.push(r);
+            let remaining = (limit - results.len() as i64) as usize;
+            let substring_rows = substring_search_rows(
+                store.ordered_items_by_id_asc(),
+                query,
+                &query_terms,
+                remaining,
+                &seen_ids,
+            );
+
+            for row in substring_rows {
+                if seen_ids.insert(row.id) {
+                    results.push(row);
                     if results.len() as i64 >= limit {
-                        break;
+                        return Ok(results);
                     }
                 }
             }
@@ -448,7 +614,13 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
 
         if (results.len() as i64) < limit {
             let remaining = limit - results.len() as i64;
-            let fuzzy_rows = fuzzy_search_rows(conn, &query_terms, remaining, &seen_ids)?;
+            let fuzzy_rows = fuzzy_search_rows(
+                store.ordered_items_by_id_desc(),
+                &query_terms,
+                remaining,
+                &seen_ids,
+            );
+
             for row in fuzzy_rows {
                 if seen_ids.insert(row.id) {
                     results.push(row);
@@ -463,60 +635,95 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
     })
 }
 
+fn substring_search_rows(
+    items: Vec<&PersistedItem>,
+    query: &str,
+    query_terms: &[String],
+    limit: usize,
+    seen_ids: &HashSet<i64>,
+) -> Vec<SearchResult> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut output = Vec::new();
+    for item in items {
+        if seen_ids.contains(&item.id) {
+            continue;
+        }
+
+        if contains_case_insensitive(&item.title, query)
+            || contains_case_insensitive(&item.note, query)
+        {
+            output.push(map_search_item(item, query_terms));
+            if output.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    output
+}
+
+fn contains_case_insensitive(text: &str, needle: &str) -> bool {
+    text.to_lowercase().contains(&needle.to_lowercase())
+}
+
+fn map_search_item(item: &PersistedItem, query_terms: &[String]) -> SearchResult {
+    let snippet_data = build_snippet_with_terms(
+        &item.title,
+        &item.subtitle,
+        &item.keywords,
+        &item.note,
+        query_terms,
+    );
+
+    SearchResult {
+        id: item.id,
+        title: item.title.clone(),
+        subtitle: String::new(),
+        snippet: snippet_data.map(|(_, text)| text),
+        snippet_source: None,
+    }
+}
+
 fn fuzzy_search_rows(
-    conn: &Connection,
+    items_by_recent_id: Vec<&PersistedItem>,
     query_terms: &[String],
     limit: i64,
     seen_ids: &HashSet<i64>,
-) -> Result<Vec<SearchResult>> {
+) -> Vec<SearchResult> {
     if limit <= 0 {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     let has_fuzzy_term = query_terms
         .iter()
         .any(|term| term.chars().count() >= FUZZY_QUERY_TERM_MIN_CHARS);
     if !has_fuzzy_term {
-        return Ok(Vec::new());
+        return Vec::new();
     }
 
     let scan_limit = (limit.max(8) * FUZZY_SCAN_MULTIPLIER).min(FUZZY_SCAN_MAX_ROWS);
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, title, subtitle, note, keywords
-         FROM items
-         ORDER BY id DESC
-         LIMIT ?1",
-    )?;
-    let rows = stmt
-        .query_map([scan_limit], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut scored: Vec<FuzzyCandidate> = Vec::new();
-    for (id, title, subtitle, note, keywords) in rows {
-        if seen_ids.contains(&id) {
+    for item in items_by_recent_id.into_iter().take(scan_limit as usize) {
+        if seen_ids.contains(&item.id) {
             continue;
         }
 
-        let score = fuzzy_row_score(&title, &note, query_terms);
+        let score = fuzzy_row_score(&item.title, &item.note, query_terms);
         if score < FUZZY_SIMILARITY_THRESHOLD {
             continue;
         }
 
         scored.push(FuzzyCandidate {
             score,
-            id,
-            title,
-            subtitle,
-            keywords,
-            note,
+            id: item.id,
+            title: item.title.clone(),
+            subtitle: item.subtitle.clone(),
+            keywords: item.keywords.clone(),
+            note: item.note.clone(),
         });
     }
 
@@ -529,7 +736,7 @@ fn fuzzy_search_rows(
             .then_with(|| left.id.cmp(&right.id))
     });
 
-    Ok(scored
+    scored
         .into_iter()
         .take(limit as usize)
         .map(|candidate| {
@@ -548,7 +755,7 @@ fn fuzzy_search_rows(
                 snippet_source: None,
             }
         })
-        .collect())
+        .collect()
 }
 
 struct FuzzyCandidate {
@@ -561,81 +768,70 @@ struct FuzzyCandidate {
 }
 
 pub fn insert_item(title: &str) -> Result<i64> {
-    run_with_recovery(|conn| {
-        conn.execute(
-            "INSERT INTO items(title, subtitle, keywords, note) VALUES (?1, '', ?2, '')",
-            params![title, title],
-        )?;
-        Ok(conn.last_insert_rowid())
+    run_with_store(|store| {
+        let id = store.next_item_id();
+        store.data.items.insert(
+            id,
+            PersistedItem {
+                id,
+                title: title.to_string(),
+                subtitle: String::new(),
+                keywords: title.to_string(),
+                note: String::new(),
+                images: Vec::new(),
+            },
+        );
+        store.flush_all()?;
+        Ok(id)
     })
 }
 
 pub fn fetch_item(id: i64) -> Result<EditableItem> {
-    run_with_recovery(|conn| {
-        let mut stmt = conn.prepare_cached("SELECT id, title, note FROM items WHERE id = ?1")?;
-        let (item_id, title, note) = stmt.query_row([id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
+    run_with_store(|store| {
+        let item = store
+            .item_by_id(id)
+            .ok_or_else(|| anyhow!("item not found: {id}"))?;
 
-        let mut image_stmt = conn.prepare_cached(
-            "SELECT image_key, image
-             FROM item_images
-             WHERE item_id = ?1
-             ORDER BY id ASC",
-        )?;
-        let images = image_stmt
-            .query_map([id], |row| {
-                Ok(NoteImage {
-                    image_key: row.get(0)?,
-                    bytes: row.get(1)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let images = item
+            .images
+            .iter()
+            .map(|image| NoteImage {
+                image_key: image.image_key.clone(),
+                bytes: image.bytes.clone(),
+            })
+            .collect();
 
-        let item = EditableItem {
-            id: item_id,
-            title,
-            note,
+        Ok(EditableItem {
+            id: item.id,
+            title: item.title.clone(),
+            note: item.note.clone(),
             images,
-        };
-        Ok(item)
+        })
     })
 }
 
 pub fn export_items_snapshot() -> Result<Vec<ExportItem>> {
-    run_with_recovery(|conn| {
-        let mut stmt = conn.prepare_cached(
-            r#"
-            SELECT
-                items.id,
-                items.title,
-                items.subtitle,
-                items.keywords,
-                COALESCE(items.note, ''),
-                COUNT(item_images.id) as image_count
-            FROM items
-            LEFT JOIN item_images ON item_images.item_id = items.id
-            GROUP BY items.id
-            ORDER BY items.title COLLATE NOCASE ASC, items.id ASC
-            "#,
-        )?;
+    run_with_store(|store| {
+        let mut rows: Vec<ExportItem> = store
+            .data
+            .items
+            .values()
+            .map(|item| ExportItem {
+                id: item.id,
+                title: item.title.clone(),
+                subtitle: item.subtitle.clone(),
+                keywords: item.keywords.clone(),
+                note: item.note.clone(),
+                image_count: item.images.len() as i64,
+            })
+            .collect();
 
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(ExportItem {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    subtitle: row.get(2)?,
-                    keywords: row.get(3)?,
-                    note: row.get(4)?,
-                    image_count: row.get(5)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.sort_by(|left, right| {
+            left.title
+                .to_lowercase()
+                .cmp(&right.title.to_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
         Ok(rows)
     })
 }
@@ -657,34 +853,29 @@ pub fn update_item(id: i64, note: &str, images: Option<&[NoteImage]>) -> Result<
         }
     }
 
-    run_with_recovery(|conn| {
-        if let Some(images) = images {
-            let tx = conn.unchecked_transaction()?;
-            tx.execute(
-                "UPDATE items SET note = ?1 WHERE id = ?2",
-                params![note, id],
-            )?;
-            tx.execute("DELETE FROM item_images WHERE item_id = ?1", [id])?;
-            {
-                let mut insert = tx.prepare(
-                    "INSERT INTO item_images(item_id, image_key, image, created_at)
-                     VALUES (?1, ?2, ?3, strftime('%s', 'now'))",
-                )?;
-                for image in images {
-                    insert.execute(params![id, image.image_key, image.bytes])?;
-                }
+    run_with_store(|store| {
+        let Some(item) = store.item_by_id_mut(id) else {
+            if matches!(images, Some(imgs) if !imgs.is_empty()) {
+                return Err(anyhow!("item not found: {id}"));
             }
-            tx.commit()?;
-        } else {
-            conn.execute(
-                "UPDATE items SET note = ?1 WHERE id = ?2",
-                params![note, id],
-            )?;
+            return Ok(());
+        };
+
+        item.note = note.to_string();
+
+        if let Some(images) = images {
+            item.images = images
+                .iter()
+                .map(|image| PersistedImage {
+                    image_key: image.image_key.clone(),
+                    bytes: image.bytes.clone(),
+                })
+                .collect();
         }
-        Ok(())
+
+        store.flush_all()
     })
 }
-
 #[cfg(test)]
 fn build_snippet(
     title: &str,
@@ -763,25 +954,6 @@ fn build_field_snippet(
     }
 
     Some((source.to_string(), snippet))
-}
-
-fn map_search_row(
-    row: &rusqlite::Row<'_>,
-    query_terms: &[String],
-) -> rusqlite::Result<SearchResult> {
-    let title: String = row.get(1)?;
-    let subtitle: String = row.get(2)?;
-    let note: String = row.get(3)?;
-    let keywords: String = row.get(4)?;
-    let snippet_data = build_snippet_with_terms(&title, &subtitle, &keywords, &note, query_terms);
-
-    Ok(SearchResult {
-        id: row.get(0)?,
-        title,
-        subtitle: String::new(),
-        snippet: snippet_data.map(|(_, text)| text),
-        snippet_source: None,
-    })
 }
 
 fn sanitize_note_for_preview(note: &str) -> String {
@@ -887,11 +1059,10 @@ struct FieldMatch {
 }
 
 fn find_field_match(text: &str, query_terms: &[String]) -> Option<FieldMatch> {
-    let hay_lower = text.to_lowercase();
-    if let Some((start, len)) = first_exact_match_position(&hay_lower, query_terms) {
+    if let Some((start, end)) = first_exact_match_position(text, query_terms) {
         return Some(FieldMatch {
             start,
-            end: start.saturating_add(len),
+            end,
             exact: true,
         });
     }
@@ -903,18 +1074,79 @@ fn find_field_match(text: &str, query_terms: &[String]) -> Option<FieldMatch> {
     })
 }
 
-fn first_exact_match_position(hay_lower: &str, query_terms: &[String]) -> Option<(usize, usize)> {
+struct LowercaseIndex {
+    lowered: String,
+    byte_to_source: Vec<(usize, usize)>,
+}
+
+fn build_lowercase_index(text: &str) -> LowercaseIndex {
+    let mut lowered = String::with_capacity(text.len());
+    let mut byte_to_source = Vec::with_capacity(text.len());
+
+    for (start, ch) in text.char_indices() {
+        let end = start + ch.len_utf8();
+        let lower_piece: String = ch.to_lowercase().collect();
+        lowered.push_str(&lower_piece);
+        byte_to_source.extend(std::iter::repeat_n((start, end), lower_piece.len()));
+    }
+
+    LowercaseIndex {
+        lowered,
+        byte_to_source,
+    }
+}
+
+fn source_range_for_lower_range(
+    index: &LowercaseIndex,
+    lower_start: usize,
+    lower_end: usize,
+) -> Option<(usize, usize)> {
+    if lower_start >= lower_end || lower_end > index.byte_to_source.len() {
+        return None;
+    }
+
+    let start = index.byte_to_source.get(lower_start)?.0;
+    let end = index.byte_to_source.get(lower_end.saturating_sub(1))?.1;
+    if start < end {
+        Some((start, end))
+    } else {
+        None
+    }
+}
+
+fn first_exact_match_position(text: &str, query_terms: &[String]) -> Option<(usize, usize)> {
+    let index = build_lowercase_index(text);
     let mut best_match: Option<(usize, usize)> = None;
 
     for term in query_terms {
-        if let Some(pos) = hay_lower.find(term) {
+        if term.is_empty() {
+            continue;
+        }
+
+        let term_lower = term.to_lowercase();
+        if term_lower.is_empty() {
+            continue;
+        }
+
+        if let Some(pos) = index.lowered.find(&term_lower) {
+            let end_pos = pos + term_lower.len();
+            let Some((source_start, source_end)) =
+                source_range_for_lower_range(&index, pos, end_pos)
+            else {
+                continue;
+            };
+
             best_match = match best_match {
-                None => Some((pos, term.len())),
-                Some((best_pos, best_len)) => {
-                    if pos < best_pos || (pos == best_pos && term.len() > best_len) {
-                        Some((pos, term.len()))
+                None => Some((source_start, source_end)),
+                Some((best_start, best_end)) => {
+                    let best_len = best_end.saturating_sub(best_start);
+                    let source_len = source_end.saturating_sub(source_start);
+                    if source_start < best_start
+                        || (source_start == best_start && source_len > best_len)
+                    {
+                        Some((source_start, source_end))
                     } else {
-                        Some((best_pos, best_len))
+                        Some((best_start, best_end))
                     }
                 }
             };
@@ -1085,28 +1317,32 @@ fn next_char_boundary(text: &str, index: usize) -> usize {
 
 fn highlight_query_terms(text: &str, query_terms: &[String]) -> String {
     let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let text_lower = text.to_lowercase();
+    let index = build_lowercase_index(text);
 
     for term in query_terms {
         if term.is_empty() {
             continue;
         }
 
+        let term_lower = term.to_lowercase();
+        if term_lower.is_empty() {
+            continue;
+        }
+
         let mut search_from = 0usize;
-        while search_from < text_lower.len() {
-            let Some(relative) = text_lower[search_from..].find(term) else {
+        while search_from < index.lowered.len() {
+            let Some(relative) = index.lowered[search_from..].find(&term_lower) else {
                 break;
             };
 
-            let raw_start = search_from + relative;
-            let raw_end = raw_start + term.len();
-            let start = previous_char_boundary(text, raw_start);
-            let end = next_char_boundary(text, raw_end.min(text.len()));
-            if start < end {
+            let lower_start = search_from + relative;
+            let lower_end = lower_start + term_lower.len();
+            if let Some((start, end)) = source_range_for_lower_range(&index, lower_start, lower_end)
+            {
                 ranges.push((start, end));
             }
 
-            search_from = raw_end;
+            search_from = lower_end;
         }
     }
 
@@ -1158,7 +1394,7 @@ fn highlight_span(text: &str, start: usize, end: usize) -> String {
     output
 }
 
-fn build_fts_query(query: &str) -> Option<String> {
+fn build_lucene_query(query: &str) -> Option<String> {
     let mut terms = Vec::new();
     for token in query.split_whitespace().take(12) {
         let sanitized: String = token
@@ -1167,7 +1403,7 @@ fn build_fts_query(query: &str) -> Option<String> {
             .take(64)
             .collect();
         if !sanitized.is_empty() {
-            terms.push(format!("(title:{sanitized}* OR note:{sanitized}*)"));
+            terms.push(format!("{sanitized}*"));
         }
     }
 
@@ -1188,6 +1424,12 @@ mod tests {
     fn highlight_query_terms_marks_multiple_case_insensitive_matches() {
         let highlighted = highlight_query_terms("Rust and swift and RUST", &["rust".into()]);
         assert_eq!(highlighted, "**Rust** and swift and **RUST**");
+    }
+
+    #[test]
+    fn highlight_query_terms_handles_unicode_case_mapping_offsets() {
+        let highlighted = highlight_query_terms("İzmir zorlama deneme", &["deneme".into()]);
+        assert_eq!(highlighted, "İzmir zorlama **deneme**");
     }
 
     #[test]
@@ -1270,6 +1512,21 @@ mod tests {
         );
         assert!(!snippet.contains("?w=360"), "snippet was: {snippet}");
         assert!(!snippet.contains('\n'), "snippet was: {snippet}");
+    }
+
+    #[test]
+    fn build_snippet_note_preview_collapses_large_newline_gaps() {
+        let result = build_snippet(
+            "Masmavi",
+            "",
+            "",
+            "zorlama\n\n\n\n\n\n\n\n\n\ndeneme",
+            "deneme",
+        );
+
+        let (source, snippet) = result.expect("snippet should be present");
+        assert_eq!(source, "note");
+        assert_eq!(snippet, "zorlama **deneme**");
     }
 
     #[test]

@@ -8,20 +8,23 @@ private let inlineImageMinWidth: Double = 140
 private let inlineImageMaxWidth: Double = 1200
 private let inlineImageResizeStep: Double = 80
 private let autosaveDebounceNanoseconds: UInt64 = 1_200_000_000
-private let searchDebounceNanoseconds: UInt64 = 90_000_000
 
 @MainActor
 final class LauncherViewModel: ObservableObject {
     @Published var query: String = "" {
         didSet {
-            if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                pendingSearchTask?.cancel()
-                results = []
-                errorMessage = nil
-                isSearching = false
+            let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedQuery.isEmpty {
+                queuedSearchQuery = nil
+                if !results.isEmpty {
+                    results = []
+                }
+                if errorMessage != nil {
+                    errorMessage = nil
+                }
                 return
             }
-            debounceSearch()
+            triggerSearch(for: trimmedQuery)
         }
     }
 
@@ -29,19 +32,19 @@ final class LauncherViewModel: ObservableObject {
     @Published private(set) var selectedItem: EditableItemRecord?
     @Published var editorText: String = ""
     @Published var errorMessage: String?
-    @Published private(set) var isSearching: Bool = false
     @Published private(set) var isEditorPresented: Bool = false
     @Published private(set) var launcherFocusRequestID: UInt64 = 0
 
-    private var pendingSearchTask: Task<Void, Never>?
-    private var searchGeneration: UInt64 = 0
+    private var queuedSearchQuery: String?
+    private var isSearchWorkerRunning = false
     private var autosaveTask: Task<Void, Never>?
     private weak var launcherWindow: NSWindow?
     private weak var editorWindow: NSWindow?
 
     func initialLoad() async {
-        if !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            await runSearch()
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedQuery.isEmpty {
+            triggerSearch(for: trimmedQuery)
         }
     }
 
@@ -148,7 +151,7 @@ final class LauncherViewModel: ObservableObject {
 
         do {
             let itemId = try RustBridgeClient.create(title: title)
-            await runSearch()
+            refreshSearchForCurrentQuery()
             return await open(itemId: itemId)
         } catch {
             errorMessage = error.localizedDescription
@@ -172,7 +175,7 @@ final class LauncherViewModel: ObservableObject {
             selectedItem = refreshed
             editorText = refreshed.note
             errorMessage = nil
-            await runSearch()
+            refreshSearchForCurrentQuery()
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -292,51 +295,64 @@ final class LauncherViewModel: ObservableObject {
         await saveCurrentItem()
     }
 
-    private func debounceSearch() {
-        pendingSearchTask?.cancel()
-        isSearching = true
-        pendingSearchTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: searchDebounceNanoseconds)
-            guard let self, !Task.isCancelled else {
+    private func refreshSearchForCurrentQuery() {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedQuery.isEmpty else {
+            return
+        }
+        triggerSearch(for: trimmedQuery)
+    }
+
+    private func triggerSearch(for trimmedQuery: String) {
+        queuedSearchQuery = trimmedQuery
+        guard !isSearchWorkerRunning else {
+            return
+        }
+        isSearchWorkerRunning = true
+
+        Task { [weak self] in
+            guard let self else {
                 return
             }
-            await self.runSearch()
+            await self.processQueuedSearches()
         }
     }
 
-    private func runSearch() async {
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            results = []
-            errorMessage = nil
-            isSearching = false
-            return
-        }
-
-        searchGeneration &+= 1
-        let generation = searchGeneration
-        isSearching = true
-
-        do {
-            let fetched = try await Task.detached(priority: .userInitiated) {
-                try RustBridgeClient.search(query: trimmed)
-            }.value
-            guard generation == searchGeneration,
-                  trimmed == query.trimmingCharacters(in: .whitespacesAndNewlines)
-            else {
-                return
+    private func processQueuedSearches() async {
+        while let currentQuery = queuedSearchQuery {
+            queuedSearchQuery = nil
+            await Task.yield()
+            if queuedSearchQuery != nil {
+                continue
             }
 
-            results = fetched
-            errorMessage = nil
-            isSearching = false
-        } catch {
-            guard generation == searchGeneration else {
-                return
+            do {
+                let fetched = try await Task.detached(priority: .userInitiated) {
+                    try RustBridgeClient.search(query: currentQuery)
+                }.value
+
+                guard currentQuery == query.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                    continue
+                }
+
+                if results != fetched {
+                    results = fetched
+                }
+                if errorMessage != nil {
+                    errorMessage = nil
+                }
+            } catch {
+                guard currentQuery == query.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                    continue
+                }
+                let message = error.localizedDescription
+                if errorMessage != message {
+                    errorMessage = message
+                }
             }
-            errorMessage = error.localizedDescription
-            isSearching = false
         }
+
+        isSearchWorkerRunning = false
     }
 
     private func clipboardImageBytes() -> Data? {

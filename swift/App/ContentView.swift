@@ -66,6 +66,11 @@ struct ContentView: View {
         .onAppear {
             searchFieldFocused = true
         }
+        .onChange(of: viewModel.query) { _, _ in
+            if selectedIndex != 0 {
+                selectedIndex = 0
+            }
+        }
         .onChange(of: viewModel.results) { _, _ in
             if viewModel.results.isEmpty {
                 selectedIndex = 0
@@ -73,7 +78,7 @@ struct ContentView: View {
                 selectedIndex = max(0, viewModel.results.count - 1)
             }
 
-            if let proxy = resultsScrollProxy {
+            if selectedIndex > 0, let proxy = resultsScrollProxy {
                 scrollSelectionIntoView(using: proxy, animated: false)
             }
         }
@@ -153,7 +158,9 @@ struct ContentView: View {
                             }
                             .onAppear {
                                 resultsScrollProxy = proxy
-                                scrollSelectionIntoView(using: proxy, animated: false)
+                                if selectedIndex > 0 {
+                                    scrollSelectionIntoView(using: proxy, animated: false)
+                                }
                             }
                             .onDisappear {
                                 if resultsScrollProxy != nil {
@@ -325,8 +332,9 @@ private struct ResultRow: View, Equatable {
                     .foregroundStyle(isSelected ? Color(white: 20 / 255) : Color(white: 35 / 255))
 
                 if let snippet = visibleSnippet {
-                    Text(attributedSnippet(snippet))
+                    Text(snippet)
                         .font(.system(size: 12))
+                        .foregroundStyle(Color(white: 70 / 255))
                         .lineLimit(2)
                 }
             }
@@ -336,26 +344,6 @@ private struct ResultRow: View, Equatable {
             .background(isSelected ? Color(red: 230 / 255, green: 236 / 255, blue: 245 / 255) : Color.clear)
         }
         .buttonStyle(.plain)
-    }
-
-    private func attributedSnippet(_ snippet: String) -> AttributedString {
-        var result = AttributedString()
-        let segments = snippetSegments(snippet)
-
-        for segment in segments {
-            var piece = AttributedString(segment.text)
-            if segment.isHighlight {
-                piece.foregroundColor = Color(red: 25 / 255, green: 25 / 255, blue: 25 / 255)
-                piece.backgroundColor = Color(red: 1.0, green: 240 / 255, blue: 120 / 255)
-                piece.font = .system(size: 12, weight: .semibold)
-            } else {
-                piece.foregroundColor = Color(white: 70 / 255)
-                piece.font = .system(size: 12)
-            }
-            result += piece
-        }
-
-        return result
     }
 
     private var visibleSnippet: String? {
@@ -368,7 +356,8 @@ private struct ResultRow: View, Equatable {
             return nil
         }
 
-        let plain = trimmed.replacingOccurrences(of: "**", with: "")
+        let plain = trimmed
+            .replacingOccurrences(of: "**", with: "")
         let withoutEllipsis = plain
             .replacingOccurrences(of: "...", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -376,34 +365,7 @@ private struct ResultRow: View, Equatable {
             return nil
         }
 
-        return trimmed
-    }
-
-    private func snippetSegments(_ snippet: String) -> [(text: String, isHighlight: Bool)] {
-        var segments: [(String, Bool)] = []
-        var rest = snippet[...]
-
-        while let start = rest.range(of: "**") {
-            if start.lowerBound > rest.startIndex {
-                segments.append((String(rest[..<start.lowerBound]), false))
-            }
-
-            let highlightStart = start.upperBound
-            guard let end = rest[highlightStart...].range(of: "**") else {
-                segments.append((String(rest[start.lowerBound...]), false))
-                rest = ""
-                break
-            }
-
-            segments.append((String(rest[highlightStart..<end.lowerBound]), true))
-            rest = rest[end.upperBound...]
-        }
-
-        if !rest.isEmpty {
-            segments.append((String(rest), false))
-        }
-
-        return segments
+        return plain
     }
 
 }

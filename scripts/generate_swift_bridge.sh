@@ -8,6 +8,9 @@ LIB_DIR="$OUT_DIR/lib"
 UNIVERSAL_LIB="$LIB_DIR/libalfred_alt_universal.a"
 HOST_STATIC_LIB="$LIB_DIR/libalfred_alt_host.a"
 HOST_DYLIB="$ROOT_DIR/target/release/libalfred_alt.dylib"
+HOST_ARCHIVE_PRIMARY="$ROOT_DIR/target/release/libalfred_alt.a"
+HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+HOST_ARCHIVE_FALLBACK="$ROOT_DIR/target/$HOST_TARGET/release/libalfred_alt.a"
 
 mkdir -p "$GENERATED_DIR" "$LIB_DIR"
 
@@ -18,10 +21,11 @@ if [[ ! -f "$HOST_DYLIB" ]]; then
     exit 1
 fi
 
-HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
-HOST_ARCHIVE="$ROOT_DIR/target/$HOST_TARGET/release/libalfred_alt.a"
-if [[ -f "$HOST_ARCHIVE" ]]; then
-    cp "$HOST_ARCHIVE" "$HOST_STATIC_LIB"
+if [[ -f "$HOST_ARCHIVE_PRIMARY" ]]; then
+    cp "$HOST_ARCHIVE_PRIMARY" "$HOST_STATIC_LIB"
+    echo "created host static library: $HOST_STATIC_LIB"
+elif [[ -f "$HOST_ARCHIVE_FALLBACK" ]]; then
+    cp "$HOST_ARCHIVE_FALLBACK" "$HOST_STATIC_LIB"
     echo "created host static library: $HOST_STATIC_LIB"
 fi
 

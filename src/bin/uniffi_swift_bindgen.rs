@@ -1,6 +1,6 @@
 use std::process;
 
-use uniffi_bindgen::bindings::{generate_swift_bindings, SwiftBindingsOptions};
+use uniffi_bindgen::bindings::{SwiftBindingsOptions, generate_swift_bindings};
 
 fn main() {
     if let Err(err) = run() {

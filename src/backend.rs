@@ -195,16 +195,11 @@ fn normalize_limit(limit: Option<u32>) -> Result<u32, BackendError> {
 }
 
 fn map_anyhow(err: anyhow::Error) -> BackendError {
-    if err.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<rusqlite::Error>(),
-            Some(rusqlite::Error::QueryReturnedNoRows)
-        )
-    }) {
+    let message = err.to_string();
+    if message.contains("item not found") {
         return BackendError::NotFound("requested item does not exist".to_string());
     }
 
-    let message = err.to_string();
     if message.contains("too many note images")
         || message.contains("exceeds")
         || message.contains("must not")
