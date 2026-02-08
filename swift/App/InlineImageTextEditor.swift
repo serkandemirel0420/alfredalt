@@ -4,17 +4,25 @@ import SwiftUI
 private let imageRefPattern = #"!\[image\]\(alfred://image/([^\)\?]+)(?:\?w=(\d+))?\)"#
 private let imageKeyAttribute = NSAttributedString.Key("InlineImageKey")
 private let imageWidthAttribute = NSAttributedString.Key("InlineImageWidth")
-private let editorFont = NSFont.systemFont(ofSize: 15)
+private let editorDefaultFontSize: CGFloat = 15
 private let editorTextColor = NSColor.labelColor
-private let editorBaseAttributes: [NSAttributedString.Key: Any] = [
-    .font: editorFont,
-    .foregroundColor: editorTextColor,
-]
+
+private func editorFont(for fontSize: CGFloat) -> NSFont {
+    NSFont.systemFont(ofSize: fontSize)
+}
+
+private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key: Any] {
+    [
+        .font: editorFont(for: fontSize),
+        .foregroundColor: editorTextColor,
+    ]
+}
 
 struct InlineImageTextEditor: NSViewRepresentable {
     @Binding var text: String
     var imagesByKey: [String: Data]
     var defaultImageWidth: CGFloat = 360
+    var fontSize: CGFloat = editorDefaultFontSize
     var onSelectionChange: ((Int?) -> Void)?
 
     func makeCoordinator() -> Coordinator {
@@ -41,10 +49,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
         textView.usesAdaptiveColorMappingForDarkAppearance = false
         textView.backgroundColor = .clear
         textView.drawsBackground = false
-        textView.font = editorFont
-        textView.textColor = editorTextColor
-        textView.insertionPointColor = editorTextColor
-        textView.typingAttributes = editorBaseAttributes
+        applyEditorTypingAppearance(to: textView, fontSize: fontSize)
         textView.textContainerInset = NSSize(width: 0, height: 6)
         textView.textContainer?.lineFragmentPadding = 0
         textView.textContainer?.widthTracksTextView = true
@@ -74,6 +79,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
         private var isApplyingProgrammaticUpdate = false
         private var lastRenderedText: String = ""
         private var lastImageSignature: Int = 0
+        private var lastRenderedFontSize: CGFloat = editorDefaultFontSize
 
         init(parent: InlineImageTextEditor) {
             self.parent = parent
@@ -85,7 +91,8 @@ struct InlineImageTextEditor: NSViewRepresentable {
             }
 
             let signature = imageSignature(parent.imagesByKey)
-            guard force || parent.text != lastRenderedText || signature != lastImageSignature else {
+            let fontSizeChanged = abs(parent.fontSize - lastRenderedFontSize) > 0.01
+            guard force || parent.text != lastRenderedText || signature != lastImageSignature || fontSizeChanged else {
                 return
             }
 
@@ -93,10 +100,15 @@ struct InlineImageTextEditor: NSViewRepresentable {
             let oldPlainCursor = plainOffset(fromAttributedLocation: oldSelection.location, in: textView)
 
             isApplyingProgrammaticUpdate = true
-            let attributed = makeAttributedText(from: parent.text, imagesByKey: parent.imagesByKey, defaultImageWidth: parent.defaultImageWidth)
+            let attributed = makeAttributedText(
+                from: parent.text,
+                imagesByKey: parent.imagesByKey,
+                defaultImageWidth: parent.defaultImageWidth,
+                fontSize: parent.fontSize
+            )
             textView.textStorage?.setAttributedString(attributed)
-            normalizeVisibleTextAttributes(in: textView)
-            applyEditorTypingAppearance(to: textView)
+            normalizeVisibleTextAttributes(in: textView, fontSize: parent.fontSize)
+            applyEditorTypingAppearance(to: textView, fontSize: parent.fontSize)
 
             let newCursorAttributedLocation = attributedLocation(fromPlainOffset: oldPlainCursor, in: textView)
             let safeLocation = max(0, min(newCursorAttributedLocation, textView.string.utf16.count))
@@ -105,6 +117,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
 
             lastRenderedText = parent.text
             lastImageSignature = signature
+            lastRenderedFontSize = parent.fontSize
             publishSelectionIfNeeded()
         }
 
@@ -114,8 +127,8 @@ struct InlineImageTextEditor: NSViewRepresentable {
             }
 
             isApplyingProgrammaticUpdate = true
-            normalizeVisibleTextAttributes(in: textView)
-            applyEditorTypingAppearance(to: textView)
+            normalizeVisibleTextAttributes(in: textView, fontSize: parent.fontSize)
+            applyEditorTypingAppearance(to: textView, fontSize: parent.fontSize)
             isApplyingProgrammaticUpdate = false
 
             let plain = makePlainText(from: textView.attributedString())
@@ -187,10 +200,11 @@ struct InlineImageTextEditor: NSViewRepresentable {
 private func makeAttributedText(
     from plainText: String,
     imagesByKey: [String: Data],
-    defaultImageWidth: CGFloat
+    defaultImageWidth: CGFloat,
+    fontSize: CGFloat
 ) -> NSAttributedString {
     let output = NSMutableAttributedString()
-    let baseAttributes = editorBaseAttributes
+    let baseAttributes = editorBaseAttributes(fontSize: fontSize)
 
     guard let regex = try? NSRegularExpression(pattern: imageRefPattern) else {
         output.append(NSAttributedString(string: plainText, attributes: baseAttributes))
@@ -245,14 +259,14 @@ private func makeAttributedText(
     return output
 }
 
-private func applyEditorTypingAppearance(to textView: NSTextView) {
-    textView.font = editorFont
+private func applyEditorTypingAppearance(to textView: NSTextView, fontSize: CGFloat) {
+    textView.font = editorFont(for: fontSize)
     textView.textColor = editorTextColor
     textView.insertionPointColor = editorTextColor
-    textView.typingAttributes = editorBaseAttributes
+    textView.typingAttributes = editorBaseAttributes(fontSize: fontSize)
 }
 
-private func normalizeVisibleTextAttributes(in textView: NSTextView) {
+private func normalizeVisibleTextAttributes(in textView: NSTextView, fontSize: CGFloat) {
     guard let storage = textView.textStorage else {
         return
     }
@@ -275,7 +289,7 @@ private func normalizeVisibleTextAttributes(in textView: NSTextView) {
 
     storage.beginEditing()
     for range in plainTextRanges {
-        storage.addAttributes(editorBaseAttributes, range: range)
+        storage.addAttributes(editorBaseAttributes(fontSize: fontSize), range: range)
     }
     storage.endEditing()
 }

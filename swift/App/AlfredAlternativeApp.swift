@@ -49,6 +49,14 @@ struct AlfredAlternativeApp: App {
                     appDelegate.viewModel = viewModel
                 }
         }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings...") {
+                    viewModel.presentSettings()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
+        }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1040, height: 220)
 

@@ -1,6 +1,8 @@
 import Foundation
 
 enum RustBridgeClient {
+    private static let appDataFolderName = "com.Codex.alfred_alt"
+
     static func version() -> String {
         backendVersion()
     }
@@ -19,5 +21,18 @@ enum RustBridgeClient {
 
     static func save(itemId: Int64, note: String, images: [NoteImageRecord]) throws {
         try saveItem(itemId: itemId, note: note, images: images)
+    }
+
+    static func jsonStorageDirectoryPath() -> String {
+        guard let supportDirectory = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            return ""
+        }
+
+        return supportDirectory
+            .appendingPathComponent(appDataFolderName, isDirectory: true)
+            .path
     }
 }

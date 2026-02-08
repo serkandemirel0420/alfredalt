@@ -8,6 +8,10 @@ private let inlineImageMinWidth: Double = 140
 private let inlineImageMaxWidth: Double = 1200
 private let inlineImageResizeStep: Double = 80
 private let autosaveDebounceNanoseconds: UInt64 = 1_200_000_000
+private let editorDefaultFontSize: CGFloat = 15
+private let editorMinFontSize: CGFloat = 11
+private let editorMaxFontSize: CGFloat = 40
+private let editorFontSizeStep: CGFloat = 1
 
 @MainActor
 final class LauncherViewModel: ObservableObject {
@@ -31,9 +35,12 @@ final class LauncherViewModel: ObservableObject {
     @Published private(set) var results: [SearchResultRecord] = []
     @Published private(set) var selectedItem: EditableItemRecord?
     @Published var editorText: String = ""
+    @Published private(set) var editorFontSize: CGFloat = editorDefaultFontSize
     @Published var errorMessage: String?
     @Published private(set) var isEditorPresented: Bool = false
     @Published private(set) var launcherFocusRequestID: UInt64 = 0
+    @Published var isSettingsPresented: Bool = false
+    @Published private(set) var settingsStorageDirectoryPath: String = ""
 
     private var queuedSearchQuery: String?
     private var isSearchWorkerRunning = false
@@ -69,6 +76,16 @@ final class LauncherViewModel: ObservableObject {
 
         NSApp.activate(ignoringOtherApps: true)
         editorWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    func presentSettings() {
+        refreshSettingsStorageDirectoryPath()
+        revealLauncherIfNeeded()
+        isSettingsPresented = true
+    }
+
+    func refreshSettingsStorageDirectoryPath() {
+        settingsStorageDirectoryPath = RustBridgeClient.jsonStorageDirectoryPath()
     }
 
     func dismissLauncher() {
@@ -212,6 +229,22 @@ final class LauncherViewModel: ObservableObject {
         autosaveTask?.cancel()
         autosaveTask = nil
         return await saveCurrentItem()
+    }
+
+    func increaseEditorFontSize() {
+        setEditorFontSize(editorFontSize + editorFontSizeStep)
+    }
+
+    func decreaseEditorFontSize() {
+        setEditorFontSize(editorFontSize - editorFontSizeStep)
+    }
+
+    private func setEditorFontSize(_ value: CGFloat) {
+        let clamped = min(max(value, editorMinFontSize), editorMaxFontSize)
+        guard abs(clamped - editorFontSize) > 0.01 else {
+            return
+        }
+        editorFontSize = clamped
     }
 
     func hasImageInClipboard() -> Bool {

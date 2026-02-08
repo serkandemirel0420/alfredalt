@@ -97,6 +97,9 @@ struct ContentView: View {
         .task {
             await viewModel.initialLoad()
         }
+        .sheet(isPresented: $viewModel.isSettingsPresented) {
+            SettingsSheet(viewModel: viewModel)
+        }
     }
 
     private func launcherShell(width: CGFloat) -> some View {
@@ -288,6 +291,9 @@ struct EditorWindowView: View {
         .onDisappear {
             viewModel.editorDidClose()
         }
+        .sheet(isPresented: $viewModel.isSettingsPresented) {
+            SettingsSheet(viewModel: viewModel)
+        }
     }
 }
 
@@ -312,6 +318,62 @@ private struct WindowAccessor: NSViewRepresentable {
                 onResolve(window)
             }
         }
+    }
+}
+
+private struct SettingsSheet: View {
+    @ObservedObject var viewModel: LauncherViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Settings")
+                .font(.system(size: 20, weight: .semibold))
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("JSON Storage Folder")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                TextField("", text: .constant(viewModel.settingsStorageDirectoryPath))
+                    .font(.system(size: 13, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(true)
+            }
+
+            HStack {
+                Button("Open in Finder") {
+                    openStorageFolder()
+                }
+
+                Spacer()
+
+                Button("Close") {
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(18)
+        .frame(minWidth: 640)
+        .onAppear {
+            viewModel.refreshSettingsStorageDirectoryPath()
+        }
+    }
+
+    private func openStorageFolder() {
+        let path = viewModel.settingsStorageDirectoryPath
+        guard !path.isEmpty else {
+            return
+        }
+
+        let folderURL = URL(fileURLWithPath: path, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        } catch {
+            return
+        }
+        NSWorkspace.shared.open(folderURL)
     }
 }
 
@@ -387,7 +449,8 @@ private struct EditorSheet: View {
             InlineImageTextEditor(
                 text: $viewModel.editorText,
                 imagesByKey: Dictionary(uniqueKeysWithValues: (viewModel.selectedItem?.images ?? []).map { ($0.imageKey, $0.bytes) }),
-                defaultImageWidth: 360
+                defaultImageWidth: 360,
+                fontSize: viewModel.editorFontSize
             ) { cursorIndex in
                 editorCursorCharIndex = cursorIndex
             }
@@ -419,6 +482,10 @@ private struct EditorSheet: View {
     private func handleEditorKeyEvent(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(keyHandlingModifierMask)
 
+        if handleEditorFontSizeShortcut(event, modifiers: modifiers) {
+            return true
+        }
+
         if modifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "v",
            viewModel.hasImageInClipboard() {
@@ -440,5 +507,37 @@ private struct EditorSheet: View {
         }
 
         return false
+    }
+
+    private func handleEditorFontSizeShortcut(_ event: NSEvent, modifiers: NSEvent.ModifierFlags) -> Bool {
+        guard modifiers == [.command] || modifiers == [.command, .shift] else {
+            return false
+        }
+
+        switch event.keyCode {
+        case 24, 69: // =/+ and keypad +
+            viewModel.increaseEditorFontSize()
+            return true
+        case 27, 78: // - and keypad -
+            viewModel.decreaseEditorFontSize()
+            return true
+        default:
+            break
+        }
+
+        guard let chars = event.charactersIgnoringModifiers else {
+            return false
+        }
+
+        switch chars {
+        case "=", "+":
+            viewModel.increaseEditorFontSize()
+            return true
+        case "-":
+            viewModel.decreaseEditorFontSize()
+            return true
+        default:
+            return false
+        }
     }
 }
