@@ -55,9 +55,6 @@ struct ContentView: View {
         )
         .background(
             KeyEventMonitor { event in
-                if viewModel.isEditorPresented {
-                    return false
-                }
                 return handleLauncherKeyEvent(event)
             }
         )

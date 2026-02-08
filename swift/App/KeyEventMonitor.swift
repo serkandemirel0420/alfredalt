@@ -6,6 +6,7 @@ struct KeyEventMonitor: NSViewRepresentable {
 
     final class Coordinator {
         var monitor: Any?
+        weak var window: NSWindow?
         var onKeyDown: (NSEvent) -> Bool = { _ in false }
     }
 
@@ -22,6 +23,12 @@ struct KeyEventMonitor: NSViewRepresentable {
                 guard let coordinator else {
                     return event
                 }
+                guard let monitoredWindow = coordinator.window else {
+                    return event
+                }
+                guard event.window === monitoredWindow else {
+                    return event
+                }
                 return coordinator.onKeyDown(event) ? nil : event
             }
         }
@@ -30,6 +37,7 @@ struct KeyEventMonitor: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.window = nsView.window
         context.coordinator.onKeyDown = onKeyDown
     }
 
@@ -38,5 +46,6 @@ struct KeyEventMonitor: NSViewRepresentable {
             NSEvent.removeMonitor(monitor)
             coordinator.monitor = nil
         }
+        coordinator.window = nil
     }
 }

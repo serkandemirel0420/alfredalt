@@ -113,12 +113,14 @@ final class LauncherViewModel: ObservableObject {
     }
 
     func dismissLauncher() {
-        guard !isEditorPresented, let launcherWindow else {
+        guard let launcherWindow else {
             return
         }
 
         launcherWindow.orderOut(nil)
-        NSApp.hide(nil)
+        if !isEditorPresented {
+            NSApp.hide(nil)
+        }
     }
 
     func revealLauncherIfNeeded() {
