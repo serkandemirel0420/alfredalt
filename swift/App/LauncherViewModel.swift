@@ -159,25 +159,40 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
-    func saveCurrentItem() async {
+    @discardableResult
+    func saveCurrentItem() async -> Bool {
         guard var item = selectedItem else {
-            return
+            return true
         }
 
         item.note = editorText
         let referenced = referencedImageKeys(in: editorText)
         item.images.removeAll { !referenced.contains($0.imageKey) }
         selectedItem = item
+        let itemId = item.id
+        let note = editorText
+        let images = item.images
 
         do {
-            try RustBridgeClient.save(itemId: item.id, note: editorText, images: item.images)
-            let refreshed = try RustBridgeClient.fetch(itemId: item.id)
+            let refreshed: EditableItemRecord = try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        try RustBridgeClient.save(itemId: itemId, note: note, images: images)
+                        let refreshed = try RustBridgeClient.fetch(itemId: itemId)
+                        continuation.resume(returning: refreshed)
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
             selectedItem = refreshed
             editorText = refreshed.note
             errorMessage = nil
             refreshSearchForCurrentQuery()
+            return true
         } catch {
             errorMessage = error.localizedDescription
+            return false
         }
     }
 
@@ -188,14 +203,15 @@ final class LauncherViewModel: ObservableObject {
             guard let self, !Task.isCancelled else {
                 return
             }
-            await self.saveCurrentItem()
+            _ = await self.saveCurrentItem()
         }
     }
 
-    func flushAutosave() async {
+    @discardableResult
+    func flushAutosave() async -> Bool {
         autosaveTask?.cancel()
         autosaveTask = nil
-        await saveCurrentItem()
+        return await saveCurrentItem()
     }
 
     func hasImageInClipboard() -> Bool {
@@ -269,7 +285,7 @@ final class LauncherViewModel: ObservableObject {
         guard setImageDisplayWidthTransient(imageKey: imageKey, width: width) else {
             return
         }
-        await saveCurrentItem()
+        _ = await saveCurrentItem()
     }
 
     @discardableResult
@@ -292,7 +308,7 @@ final class LauncherViewModel: ObservableObject {
     }
 
     func persistEditorState() async {
-        await saveCurrentItem()
+        _ = await saveCurrentItem()
     }
 
     private func refreshSearchForCurrentQuery() {

@@ -377,6 +377,7 @@ private struct EditorSheet: View {
     @ObservedObject var viewModel: LauncherViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var editorCursorCharIndex: Int?
+    @State private var isClosingEditor = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -404,7 +405,13 @@ private struct EditorSheet: View {
         .onChange(of: viewModel.editorText) { _, _ in
             viewModel.scheduleAutosave()
         }
+        .onAppear {
+            isClosingEditor = false
+        }
         .onDisappear {
+            if isClosingEditor {
+                return
+            }
             Task { await viewModel.flushAutosave() }
         }
     }
@@ -420,10 +427,15 @@ private struct EditorSheet: View {
         }
 
         if modifiers.isEmpty, event.keyCode == 53 {
-            Task {
-                await viewModel.flushAutosave()
-                dismiss()
+            guard !isClosingEditor else {
+                return true
             }
+
+            isClosingEditor = true
+            Task { @MainActor in
+                _ = await viewModel.flushAutosave()
+            }
+            dismiss()
             return true
         }
 
