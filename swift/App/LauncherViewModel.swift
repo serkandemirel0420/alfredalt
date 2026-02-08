@@ -40,7 +40,9 @@ final class LauncherViewModel: ObservableObject {
     @Published private(set) var isEditorPresented: Bool = false
     @Published private(set) var launcherFocusRequestID: UInt64 = 0
     @Published var isSettingsPresented: Bool = false
-    @Published private(set) var settingsStorageDirectoryPath: String = ""
+    @Published var settingsStorageDirectoryPath: String = ""
+    @Published var settingsErrorMessage: String?
+    @Published var settingsSuccessMessage: String?
 
     private var queuedSearchQuery: String?
     private var isSearchWorkerRunning = false
@@ -79,13 +81,35 @@ final class LauncherViewModel: ObservableObject {
     }
 
     func presentSettings() {
-        refreshSettingsStorageDirectoryPath()
+        settingsErrorMessage = nil
+        settingsSuccessMessage = nil
+        loadSettingsStorageDirectoryPath()
         revealLauncherIfNeeded()
         isSettingsPresented = true
     }
 
-    func refreshSettingsStorageDirectoryPath() {
-        settingsStorageDirectoryPath = RustBridgeClient.jsonStorageDirectoryPath()
+    func loadSettingsStorageDirectoryPath() {
+        do {
+            settingsStorageDirectoryPath = try RustBridgeClient.loadJsonStorageDirectoryPath()
+            settingsErrorMessage = nil
+        } catch {
+            settingsErrorMessage = error.localizedDescription
+        }
+    }
+
+    @discardableResult
+    func saveSettingsStorageDirectoryPath() -> Bool {
+        do {
+            try RustBridgeClient.saveJsonStorageDirectoryPath(settingsStorageDirectoryPath)
+            settingsStorageDirectoryPath = try RustBridgeClient.loadJsonStorageDirectoryPath()
+            settingsErrorMessage = nil
+            settingsSuccessMessage = "Saved."
+            return true
+        } catch {
+            settingsErrorMessage = error.localizedDescription
+            settingsSuccessMessage = nil
+            return false
+        }
     }
 
     func dismissLauncher() {

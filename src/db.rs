@@ -1,16 +1,18 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, ensure};
-use directories::ProjectDirs;
+use directories::{ProjectDirs, UserDirs};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
 use tantivy::query::{AllQuery, BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::{Field, INDEXED, IndexRecordOption, STORED, STRING, Schema, TEXT, Value};
+use tantivy::snippet::{Snippet, SnippetGenerator};
 use tantivy::{Index, IndexReader, IndexWriter, TantivyDocument, Term, doc};
 
 use crate::models::{EditableItem, NoteImage, SearchResult};
@@ -20,11 +22,14 @@ pub const MAX_SCREENSHOT_BYTES: usize = 12_000_000;
 pub const MAX_NOTE_IMAGE_COUNT: usize = 24;
 pub const DEFAULT_HOTKEY: &str = "super+Space";
 const HOTKEY_SETTING_KEY: &str = "launcher_hotkey";
+const JSON_STORAGE_PATH_SETTING_KEY: &str = "json_storage_path";
 const FUZZY_QUERY_TERM_MIN_CHARS: usize = 4;
 const FUZZY_SIMILARITY_THRESHOLD: f32 = 0.62;
 const FUZZY_SCAN_MULTIPLIER: i64 = 64;
 const FUZZY_SCAN_MAX_ROWS: i64 = 2048;
 const INDEX_DIR_NAME: &str = "alfred_lucene_index";
+const DEFAULT_JSON_STORAGE_DIR_NAME: &str = "AlfredAlternativeData";
+const JSON_STORAGE_IMAGES_DIR_NAME: &str = "images";
 const LEGACY_INDEX_DIR_NAME: &str = "alfred_search_index";
 const LEGACY_DATA_FILE_NAME: &str = "alfred_store.json";
 const LEGACY_DATA_TMP_FILE_NAME: &str = "alfred_store.json.tmp";
@@ -34,6 +39,7 @@ const LEGACY_DB_SHM_FILE_NAME: &str = "alfred.db-shm";
 const INDEX_WRITER_HEAP_BYTES: usize = 50_000_000;
 const DOC_TYPE_ITEM: &str = "item";
 const DOC_TYPE_SETTING: &str = "setting";
+const LUCENE_SNIPPET_MAX_CHARS: usize = 120;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExportItem {
@@ -59,6 +65,22 @@ struct PersistedItem {
     keywords: String,
     note: String,
     images: Vec<PersistedImage>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonImageEntry {
+    image_key: String,
+    file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JsonItemFile {
+    id: i64,
+    title: String,
+    subtitle: String,
+    keywords: String,
+    note: String,
+    images: Vec<JsonImageEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -97,6 +119,117 @@ fn project_data_dir() -> Result<PathBuf> {
 
 fn index_path() -> Result<PathBuf> {
     Ok(project_data_dir()?.join(INDEX_DIR_NAME))
+}
+
+fn default_json_storage_root() -> PathBuf {
+    if let Some(user_dirs) = UserDirs::new() {
+        if let Some(documents_dir) = user_dirs.document_dir() {
+            return documents_dir.join(DEFAULT_JSON_STORAGE_DIR_NAME);
+        }
+        return user_dirs.home_dir().join(DEFAULT_JSON_STORAGE_DIR_NAME);
+    }
+
+    match project_data_dir() {
+        Ok(data_dir) => data_dir.join("json_storage"),
+        Err(_) => PathBuf::from(DEFAULT_JSON_STORAGE_DIR_NAME),
+    }
+}
+
+fn normalize_storage_path(raw_path: &str) -> PathBuf {
+    let trimmed = raw_path.trim();
+    if trimmed.is_empty() {
+        return default_json_storage_root();
+    }
+
+    let expanded = if trimmed == "~" {
+        UserDirs::new()
+            .map(|dirs| dirs.home_dir().to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(trimmed))
+    } else if let Some(suffix) = trimmed.strip_prefix("~/") {
+        UserDirs::new()
+            .map(|dirs| dirs.home_dir().join(suffix))
+            .unwrap_or_else(|| PathBuf::from(trimmed))
+    } else {
+        PathBuf::from(trimmed)
+    };
+
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(&expanded))
+            .unwrap_or(expanded)
+    }
+}
+
+fn default_json_storage_path_string() -> String {
+    default_json_storage_root().to_string_lossy().to_string()
+}
+
+fn json_storage_root_from_settings(settings: &HashMap<String, String>) -> PathBuf {
+    settings
+        .get(JSON_STORAGE_PATH_SETTING_KEY)
+        .map(|stored| normalize_storage_path(stored))
+        .unwrap_or_else(default_json_storage_root)
+}
+
+fn item_json_file_name(item_id: i64) -> String {
+    format!("item-{item_id}.json")
+}
+
+fn is_item_json_file_name(name: &str) -> bool {
+    name.starts_with("item-") && name.ends_with(".json")
+}
+
+fn image_file_name(image_key: &str) -> String {
+    let mut encoded = String::with_capacity(image_key.len() + 4);
+    for byte in image_key.bytes() {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            encoded.push(ch);
+        } else {
+            encoded.push_str(&format!("_{byte:02x}"));
+        }
+    }
+
+    if encoded.is_empty() {
+        "image.bin".to_string()
+    } else {
+        format!("{encoded}.bin")
+    }
+}
+
+fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
+    let payload = serde_json::to_vec_pretty(value).context("failed to serialize JSON payload")?;
+    write_bytes_atomic(path, &payload)
+}
+
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Err(anyhow!("cannot resolve parent directory for {}", path.display()));
+    };
+
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create directory {}", parent.display()))?;
+
+    let stamp = unix_timestamp();
+    let pid = std::process::id();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("payload");
+    let temp_path = parent.join(format!(".{file_name}.tmp-{pid}-{stamp}"));
+
+    std::fs::write(&temp_path, bytes)
+        .with_context(|| format!("failed writing temporary file {}", temp_path.display()))?;
+    std::fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "failed moving temporary file {} to {}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn get_store() -> Result<&'static Mutex<Store>> {
@@ -148,10 +281,15 @@ impl Store {
             .settings
             .entry(HOTKEY_SETTING_KEY.to_string())
             .or_insert_with(|| DEFAULT_HOTKEY.to_string());
+        self.data
+            .settings
+            .entry(JSON_STORAGE_PATH_SETTING_KEY.to_string())
+            .or_insert_with(default_json_storage_path_string);
     }
 
     fn flush_all(&mut self) -> Result<()> {
-        self.rebuild_index()
+        self.rebuild_index()?;
+        self.sync_json_storage()
     }
 
     fn rebuild_index(&mut self) -> Result<()> {
@@ -177,6 +315,124 @@ impl Store {
         self.reader
             .reload()
             .context("failed to reload Lucene reader")?;
+        Ok(())
+    }
+
+    fn json_storage_root(&self) -> PathBuf {
+        json_storage_root_from_settings(&self.data.settings)
+    }
+
+    fn sync_json_storage(&self) -> Result<()> {
+        let root = self.json_storage_root();
+        let images_dir = root.join(JSON_STORAGE_IMAGES_DIR_NAME);
+        std::fs::create_dir_all(&root).with_context(|| {
+            format!("failed to create JSON storage root {}", root.display())
+        })?;
+        std::fs::create_dir_all(&images_dir).with_context(|| {
+            format!(
+                "failed to create JSON image storage directory {}",
+                images_dir.display()
+            )
+        })?;
+
+        let mut expected_item_files = HashSet::new();
+        let mut expected_image_files = HashSet::new();
+
+        for item in self.data.items.values() {
+            let mut image_entries = Vec::with_capacity(item.images.len());
+            for image in &item.images {
+                let file_name = image_file_name(&image.image_key);
+                let image_path = images_dir.join(&file_name);
+                write_bytes_atomic(&image_path, &image.bytes).with_context(|| {
+                    format!("failed to write image file {}", image_path.display())
+                })?;
+
+                expected_image_files.insert(file_name.clone());
+                image_entries.push(JsonImageEntry {
+                    image_key: image.image_key.clone(),
+                    file_name,
+                });
+            }
+
+            let item_file_name = item_json_file_name(item.id);
+            let item_path = root.join(&item_file_name);
+            let json_item = JsonItemFile {
+                id: item.id,
+                title: item.title.clone(),
+                subtitle: item.subtitle.clone(),
+                keywords: item.keywords.clone(),
+                note: item.note.clone(),
+                images: image_entries,
+            };
+            write_json_atomic(&item_path, &json_item).with_context(|| {
+                format!("failed to write item JSON file {}", item_path.display())
+            })?;
+
+            expected_item_files.insert(item_file_name);
+        }
+
+        self.prune_stale_item_json_files(&root, &expected_item_files)?;
+        self.prune_stale_image_files(&images_dir, &expected_image_files)?;
+        Ok(())
+    }
+
+    fn prune_stale_item_json_files(
+        &self,
+        root: &Path,
+        expected_file_names: &HashSet<String>,
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(root)
+            .with_context(|| format!("failed to scan {}", root.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+
+            if !is_item_json_file_name(file_name) {
+                continue;
+            }
+
+            if expected_file_names.contains(file_name) {
+                continue;
+            }
+
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed removing stale JSON file {}", path.display()))?;
+        }
+        Ok(())
+    }
+
+    fn prune_stale_image_files(
+        &self,
+        images_dir: &Path,
+        expected_file_names: &HashSet<String>,
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(images_dir)
+            .with_context(|| format!("failed to scan {}", images_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+
+            if expected_file_names.contains(file_name) {
+                continue;
+            }
+
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed removing stale image file {}", path.display()))?;
+        }
         Ok(())
     }
 
@@ -234,7 +490,7 @@ impl Store {
         self.data.items.values().rev().collect()
     }
 
-    fn lucene_search_ids(&mut self, query: &str, limit: usize) -> Result<Vec<i64>> {
+    fn lucene_search_hits(&mut self, query: &str, limit: usize) -> Result<Vec<LuceneSearchHit>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -259,10 +515,20 @@ impl Store {
         );
         parser.set_conjunction_by_default();
 
+        let snippet_query = match parser.parse_query(&lucene_query) {
+            Ok(query) => query,
+            Err(_) => return Ok(Vec::new()),
+        };
         let text_query = match parser.parse_query(&lucene_query) {
             Ok(query) => query,
             Err(_) => return Ok(Vec::new()),
         };
+
+        let mut snippet_generator =
+            SnippetGenerator::create(&searcher, &*snippet_query, self.fields.note).ok();
+        if let Some(generator) = snippet_generator.as_mut() {
+            generator.set_max_num_chars(LUCENE_SNIPPET_MAX_CHARS);
+        }
 
         let item_filter = TermQuery::new(
             Term::from_field_text(self.fields.doc_type, DOC_TYPE_ITEM),
@@ -277,20 +543,27 @@ impl Store {
             .search(&query, &TopDocs::with_limit(limit))
             .context("failed to execute Lucene search")?;
 
-        let mut ids = Vec::with_capacity(top_docs.len());
+        let mut hits = Vec::with_capacity(top_docs.len());
         for (_, addr) in top_docs {
             let doc: TantivyDocument = searcher
                 .doc(addr)
                 .context("failed to load Lucene document")?;
-            if let Some(id) = doc
-                .get_first(self.fields.id)
-                .and_then(|value| value.as_i64())
-            {
-                ids.push(id);
-            }
+            let Some(id) = doc.get_first(self.fields.id).and_then(|value| value.as_i64()) else {
+                continue;
+            };
+
+            let note = doc
+                .get_first(self.fields.note)
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let note_snippet = snippet_generator
+                .as_ref()
+                .and_then(|generator| build_lucene_note_snippet(note, generator));
+
+            hits.push(LuceneSearchHit { id, note_snippet });
         }
 
-        Ok(ids)
+        Ok(hits)
     }
 }
 
@@ -548,6 +821,21 @@ pub fn save_hotkey_setting(value: &str) -> Result<()> {
     })
 }
 
+pub fn load_json_storage_path_setting() -> Result<String> {
+    run_with_store(|store| Ok(store.json_storage_root().to_string_lossy().to_string()))
+}
+
+pub fn save_json_storage_path_setting(value: &str) -> Result<()> {
+    let normalized = normalize_storage_path(value);
+    run_with_store(|store| {
+        store.data.settings.insert(
+            JSON_STORAGE_PATH_SETTING_KEY.to_string(),
+            normalized.to_string_lossy().to_string(),
+        );
+        store.flush_all()
+    })
+}
+
 pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
     run_with_store(|store| {
         let limit = limit.max(0);
@@ -576,17 +864,17 @@ pub fn search(query: &str, limit: i64) -> Result<Vec<SearchResult>> {
         let mut results = Vec::with_capacity(limit as usize);
         let mut seen_ids = HashSet::with_capacity(limit as usize);
 
-        let lucene_ids = store.lucene_search_ids(query, limit as usize)?;
-        for id in lucene_ids {
-            if !seen_ids.insert(id) {
+        let lucene_hits = store.lucene_search_hits(query, limit as usize)?;
+        for hit in lucene_hits {
+            if !seen_ids.insert(hit.id) {
                 continue;
             }
 
-            let Some(item) = store.item_by_id(id) else {
+            let Some(item) = store.item_by_id(hit.id) else {
                 continue;
             };
 
-            results.push(map_search_item(item, &query_terms));
+            results.push(map_search_item(item, &query_terms, hit.note_snippet));
             if results.len() as i64 >= limit {
                 return Ok(results);
             }
@@ -655,7 +943,7 @@ fn substring_search_rows(
         if contains_case_insensitive(&item.title, query)
             || contains_case_insensitive(&item.note, query)
         {
-            output.push(map_search_item(item, query_terms));
+            output.push(map_search_item(item, query_terms, None));
             if output.len() >= limit {
                 break;
             }
@@ -669,21 +957,34 @@ fn contains_case_insensitive(text: &str, needle: &str) -> bool {
     text.to_lowercase().contains(&needle.to_lowercase())
 }
 
-fn map_search_item(item: &PersistedItem, query_terms: &[String]) -> SearchResult {
-    let snippet_data = build_snippet_with_terms(
-        &item.title,
-        &item.subtitle,
-        &item.keywords,
-        &item.note,
-        query_terms,
-    );
+fn map_search_item(
+    item: &PersistedItem,
+    query_terms: &[String],
+    preferred_snippet: Option<String>,
+) -> SearchResult {
+    let snippet_data = preferred_snippet
+        .map(|snippet| ("note".to_string(), snippet))
+        .or_else(|| {
+            build_snippet_with_terms(
+                &item.title,
+                &item.subtitle,
+                &item.keywords,
+                &item.note,
+                query_terms,
+            )
+        });
+
+    let (snippet_source, snippet) = match snippet_data {
+        Some((source, snippet)) => (Some(source), Some(snippet)),
+        None => (None, None),
+    };
 
     SearchResult {
         id: item.id,
         title: item.title.clone(),
         subtitle: String::new(),
-        snippet: snippet_data.map(|(_, text)| text),
-        snippet_source: None,
+        snippet,
+        snippet_source,
     }
 }
 
@@ -747,15 +1048,24 @@ fn fuzzy_search_rows(
                 &candidate.note,
                 query_terms,
             );
+            let (snippet_source, snippet) = match snippet_data {
+                Some((source, snippet)) => (Some(source), Some(snippet)),
+                None => (None, None),
+            };
             SearchResult {
                 id: candidate.id,
                 title: candidate.title,
                 subtitle: String::new(),
-                snippet: snippet_data.map(|(_, text)| text),
-                snippet_source: None,
+                snippet,
+                snippet_source,
             }
         })
         .collect()
+}
+
+struct LuceneSearchHit {
+    id: i64,
+    note_snippet: Option<String>,
 }
 
 struct FuzzyCandidate {
@@ -889,7 +1199,7 @@ fn build_snippet(
 }
 
 fn build_snippet_with_terms(
-    title: &str,
+    _title: &str,
     subtitle: &str,
     keywords: &str,
     note: &str,
@@ -901,11 +1211,8 @@ fn build_snippet_with_terms(
 
     let sanitized_note = sanitize_note_for_preview(note);
 
-    // Prefer note previews; use title as fallback.
+    // Keep highlights in content fields instead of title.
     if let Some(snippet) = build_field_snippet("note", &sanitized_note, query_terms, 24) {
-        return Some(snippet);
-    }
-    if let Some(snippet) = build_field_snippet("title", title, query_terms, 32) {
         return Some(snippet);
     }
     if let Some(snippet) = build_field_snippet("subtitle", subtitle, query_terms, 32) {
@@ -1315,6 +1622,77 @@ fn next_char_boundary(text: &str, index: usize) -> usize {
     cursor
 }
 
+fn build_lucene_note_snippet(note: &str, snippet_generator: &SnippetGenerator) -> Option<String> {
+    let sanitized_note = sanitize_note_for_preview(note);
+    if sanitized_note.is_empty() {
+        return None;
+    }
+
+    let snippet = snippet_generator.snippet(&sanitized_note);
+    snippet_with_markers(&snippet)
+}
+
+fn snippet_with_markers(snippet: &Snippet) -> Option<String> {
+    if snippet.is_empty() {
+        return None;
+    }
+
+    let text = snippet.fragment();
+    if text.is_empty() {
+        return None;
+    }
+
+    let mut ranges: Vec<Range<usize>> = snippet
+        .highlighted()
+        .iter()
+        .filter_map(|range| {
+            let start = previous_char_boundary(text, range.start.min(text.len()));
+            let end = next_char_boundary(text, range.end.min(text.len()));
+            (start < end).then_some(start..end)
+        })
+        .collect();
+    if ranges.is_empty() {
+        return None;
+    }
+
+    ranges.sort_unstable_by_key(|range| range.start);
+
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(last) = merged.last_mut() {
+            if range.start <= last.end {
+                if range.end > last.end {
+                    last.end = range.end;
+                }
+                continue;
+            }
+        }
+        merged.push(range);
+    }
+
+    let mut rendered = String::with_capacity(text.len() + merged.len() * 4);
+    let mut cursor = 0usize;
+    for range in merged {
+        rendered.push_str(&text[cursor..range.start]);
+        rendered.push_str("**");
+        rendered.push_str(&text[range.start..range.end]);
+        rendered.push_str("**");
+        cursor = range.end;
+    }
+    rendered.push_str(&text[cursor..]);
+
+    if rendered.matches("**").count() < 2 {
+        return None;
+    }
+
+    let trimmed = rendered.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 fn highlight_query_terms(text: &str, query_terms: &[String]) -> String {
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let index = build_lowercase_index(text);
@@ -1449,7 +1827,7 @@ mod tests {
     }
 
     #[test]
-    fn build_snippet_ignores_title_only_matches() {
+    fn build_snippet_omits_title_only_matches() {
         let result = build_snippet(
             "Swift Launcher",
             "",
@@ -1457,9 +1835,7 @@ mod tests {
             "No matching content here.",
             "swift",
         );
-        let (source, snippet) = result.expect("snippet should be present");
-        assert_eq!(source, "title");
-        assert!(snippet.contains("**Swift**"), "snippet was: {snippet}");
+        assert!(result.is_none(), "snippet was: {result:?}");
     }
 
     #[test]

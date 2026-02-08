@@ -279,6 +279,12 @@ RustBuffer uniffi_alfred_alt_fn_func_load_hotkey(RustCallStatus *_Nonnull out_st
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_LOAD_JSON_STORAGE_PATH
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_LOAD_JSON_STORAGE_PATH
+RustBuffer uniffi_alfred_alt_fn_func_load_json_storage_path(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SAVE_HOTKEY
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SAVE_HOTKEY
 void uniffi_alfred_alt_fn_func_save_hotkey(RustBuffer hotkey, RustCallStatus *_Nonnull out_status
@@ -287,6 +293,11 @@ void uniffi_alfred_alt_fn_func_save_hotkey(RustBuffer hotkey, RustCallStatus *_N
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SAVE_ITEM
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SAVE_ITEM
 void uniffi_alfred_alt_fn_func_save_item(int64_t item_id, RustBuffer note, RustBuffer images, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SAVE_JSON_STORAGE_PATH
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SAVE_JSON_STORAGE_PATH
+void uniffi_alfred_alt_fn_func_save_json_storage_path(RustBuffer path, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SEARCH_ITEMS
@@ -604,6 +615,12 @@ uint16_t uniffi_alfred_alt_checksum_func_load_hotkey(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LOAD_JSON_STORAGE_PATH
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LOAD_JSON_STORAGE_PATH
+uint16_t uniffi_alfred_alt_checksum_func_load_json_storage_path(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_SAVE_HOTKEY
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_SAVE_HOTKEY
 uint16_t uniffi_alfred_alt_checksum_func_save_hotkey(void
@@ -613,6 +630,12 @@ uint16_t uniffi_alfred_alt_checksum_func_save_hotkey(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_SAVE_ITEM
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_SAVE_ITEM
 uint16_t uniffi_alfred_alt_checksum_func_save_item(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_SAVE_JSON_STORAGE_PATH
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_SAVE_JSON_STORAGE_PATH
+uint16_t uniffi_alfred_alt_checksum_func_save_json_storage_path(void
     
 );
 #endif

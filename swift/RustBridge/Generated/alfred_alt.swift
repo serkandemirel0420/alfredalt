@@ -1090,6 +1090,12 @@ public func loadHotkey()throws  -> String  {
     )
 })
 }
+public func loadJsonStoragePath()throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeBackendError_lift) {
+    uniffi_alfred_alt_fn_func_load_json_storage_path($0
+    )
+})
+}
 public func saveHotkey(hotkey: String)throws   {try rustCallWithError(FfiConverterTypeBackendError_lift) {
     uniffi_alfred_alt_fn_func_save_hotkey(
         FfiConverterString.lower(hotkey),$0
@@ -1101,6 +1107,12 @@ public func saveItem(itemId: Int64, note: String, images: [NoteImageRecord])thro
         FfiConverterInt64.lower(itemId),
         FfiConverterString.lower(note),
         FfiConverterSequenceTypeNoteImageRecord.lower(images),$0
+    )
+}
+}
+public func saveJsonStoragePath(path: String)throws   {try rustCallWithError(FfiConverterTypeBackendError_lift) {
+    uniffi_alfred_alt_fn_func_save_json_storage_path(
+        FfiConverterString.lower(path),$0
     )
 }
 }
@@ -1143,10 +1155,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_alfred_alt_checksum_func_load_hotkey() != 36564) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_alfred_alt_checksum_func_load_json_storage_path() != 17743) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_alfred_alt_checksum_func_save_hotkey() != 49443) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_alfred_alt_checksum_func_save_item() != 60654) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_alfred_alt_checksum_func_save_json_storage_path() != 45047) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_alfred_alt_checksum_func_search_items() != 22056) {

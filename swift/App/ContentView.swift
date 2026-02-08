@@ -324,6 +324,7 @@ private struct WindowAccessor: NSViewRepresentable {
 private struct SettingsSheet: View {
     @ObservedObject var viewModel: LauncherViewModel
     @Environment(\.dismiss) private var dismiss
+    @FocusState private var pathFieldFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -335,39 +336,67 @@ private struct SettingsSheet: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
 
-                TextField("", text: .constant(viewModel.settingsStorageDirectoryPath))
+                TextField("Folder path", text: $viewModel.settingsStorageDirectoryPath)
                     .font(.system(size: 13, design: .monospaced))
                     .textFieldStyle(.roundedBorder)
-                    .disabled(true)
+                    .focused($pathFieldFocused)
+            }
+
+            if let settingsErrorMessage = viewModel.settingsErrorMessage {
+                Text(settingsErrorMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.red)
+            }
+
+            if let settingsSuccessMessage = viewModel.settingsSuccessMessage {
+                Text(settingsSuccessMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color(nsColor: .systemGreen))
             }
 
             HStack {
+                Button("Browse...") {
+                    chooseStorageFolder()
+                }
+
                 Button("Open in Finder") {
                     openStorageFolder()
                 }
 
                 Spacer()
 
+                Button("Save") {
+                    _ = viewModel.saveSettingsStorageDirectoryPath()
+                }
+                .keyboardShortcut("s", modifiers: .command)
+
                 Button("Close") {
                     dismiss()
                 }
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(.cancelAction)
             }
         }
         .padding(18)
-        .frame(minWidth: 640)
+        .frame(minWidth: 720)
         .onAppear {
-            viewModel.refreshSettingsStorageDirectoryPath()
+            viewModel.loadSettingsStorageDirectoryPath()
+            pathFieldFocused = true
+        }
+        .onChange(of: viewModel.settingsStorageDirectoryPath) { _, _ in
+            if viewModel.settingsSuccessMessage != nil {
+                viewModel.settingsSuccessMessage = nil
+            }
         }
     }
 
     private func openStorageFolder() {
-        let path = viewModel.settingsStorageDirectoryPath
+        let path = viewModel.settingsStorageDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty else {
             return
         }
+        let expandedPath = (path as NSString).expandingTildeInPath
 
-        let folderURL = URL(fileURLWithPath: path, isDirectory: true)
+        let folderURL = URL(fileURLWithPath: expandedPath, isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
         } catch {
@@ -375,9 +404,38 @@ private struct SettingsSheet: View {
         }
         NSWorkspace.shared.open(folderURL)
     }
+
+    private func chooseStorageFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose JSON Storage Folder"
+        panel.message = "JSON files will be written here, with images in an images folder."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+
+        let currentPath = viewModel.settingsStorageDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !currentPath.isEmpty {
+            panel.directoryURL = URL(
+                fileURLWithPath: (currentPath as NSString).expandingTildeInPath,
+                isDirectory: true
+            )
+        }
+
+        if panel.runModal() == .OK, let selectedURL = panel.url {
+            viewModel.settingsStorageDirectoryPath = selectedURL.path
+            viewModel.settingsErrorMessage = nil
+            viewModel.settingsSuccessMessage = nil
+        }
+    }
 }
 
 private struct ResultRow: View, Equatable {
+    private struct SnippetSegment {
+        let text: String
+        let isHighlighted: Bool
+    }
+
     let item: SearchResultRecord
     let isSelected: Bool
     let onActivate: () -> Void
@@ -396,10 +454,8 @@ private struct ResultRow: View, Equatable {
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(isSelected ? Color(white: 20 / 255) : Color(white: 35 / 255))
 
-                if let snippet = visibleSnippet {
-                    Text(snippet)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color(white: 70 / 255))
+                if let snippetSegments = visibleSnippetSegments {
+                    highlightedSnippetText(from: snippetSegments)
                         .lineLimit(2)
                 }
             }
@@ -411,7 +467,7 @@ private struct ResultRow: View, Equatable {
         .buttonStyle(.plain)
     }
 
-    private var visibleSnippet: String? {
+    private var visibleSnippetSegments: [SnippetSegment]? {
         guard let snippet = item.snippet else {
             return nil
         }
@@ -421,16 +477,64 @@ private struct ResultRow: View, Equatable {
             return nil
         }
 
-        let plain = trimmed
-            .replacingOccurrences(of: "**", with: "")
-        let withoutEllipsis = plain
-            .replacingOccurrences(of: "...", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !withoutEllipsis.isEmpty else {
+        let segments = parseSnippetSegments(trimmed)
+        let hasVisibleText = segments.contains { segment in
+            !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard hasVisibleText else {
             return nil
         }
 
-        return plain
+        return segments
+    }
+
+    private func highlightedSnippetText(from segments: [SnippetSegment]) -> Text {
+        var attributed = AttributedString()
+        for segment in segments {
+            var part = AttributedString(segment.text)
+            part.font = .system(size: 12, weight: .regular)
+            part.foregroundColor = segment.isHighlighted
+                ? Color(white: 20 / 255)
+                : Color(white: 70 / 255)
+
+            if segment.isHighlighted {
+                part.backgroundColor = Color.yellow.opacity(0.55)
+            }
+
+            attributed.append(part)
+        }
+        return Text(attributed)
+    }
+
+    private func parseSnippetSegments(_ snippet: String) -> [SnippetSegment] {
+        var segments: [SnippetSegment] = []
+        var buffer = String()
+        var isHighlighted = false
+        var cursor = snippet.startIndex
+
+        while cursor < snippet.endIndex {
+            let next = snippet.index(after: cursor)
+            if snippet[cursor] == "*",
+               next < snippet.endIndex,
+               snippet[next] == "*" {
+                if !buffer.isEmpty {
+                    segments.append(SnippetSegment(text: buffer, isHighlighted: isHighlighted))
+                    buffer.removeAll(keepingCapacity: true)
+                }
+                isHighlighted.toggle()
+                cursor = snippet.index(after: next)
+                continue
+            }
+
+            buffer.append(snippet[cursor])
+            cursor = next
+        }
+
+        if !buffer.isEmpty {
+            segments.append(SnippetSegment(text: buffer, isHighlighted: isHighlighted))
+        }
+
+        return segments
     }
 
 }

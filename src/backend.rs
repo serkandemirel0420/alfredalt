@@ -174,6 +174,16 @@ pub fn save_hotkey(hotkey: String) -> Result<(), BackendError> {
     db::save_hotkey_setting(hotkey).map_err(map_anyhow)
 }
 
+#[uniffi::export]
+pub fn load_json_storage_path() -> Result<String, BackendError> {
+    db::load_json_storage_path_setting().map_err(map_anyhow)
+}
+
+#[uniffi::export]
+pub fn save_json_storage_path(path: String) -> Result<(), BackendError> {
+    db::save_json_storage_path_setting(path.trim()).map_err(map_anyhow)
+}
+
 fn ensure_item_id(item_id: i64) -> Result<(), BackendError> {
     if item_id <= 0 {
         return Err(BackendError::Validation(
