@@ -1186,6 +1186,27 @@ pub fn update_item(id: i64, note: &str, images: Option<&[NoteImage]>) -> Result<
         store.flush_all()
     })
 }
+
+pub fn delete_item(id: i64) -> Result<()> {
+    run_with_store(|store| {
+        if store.data.items.remove(&id).is_none() {
+            return Err(anyhow!("item not found: {id}"));
+        }
+        store.flush_all()
+    })
+}
+
+pub fn get_item_json_path(id: i64) -> Result<String> {
+    run_with_store(|store| {
+        if store.item_by_id(id).is_none() {
+            return Err(anyhow!("item not found: {id}"));
+        }
+        let root = store.json_storage_root();
+        let file_name = item_json_file_name(id);
+        Ok(root.join(file_name).to_string_lossy().to_string())
+    })
+}
+
 #[cfg(test)]
 fn build_snippet(
     title: &str,

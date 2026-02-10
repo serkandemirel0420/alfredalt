@@ -184,6 +184,18 @@ pub fn save_json_storage_path(path: String) -> Result<(), BackendError> {
     db::save_json_storage_path_setting(path.trim()).map_err(map_anyhow)
 }
 
+#[uniffi::export]
+pub fn delete_item(item_id: i64) -> Result<(), BackendError> {
+    ensure_item_id(item_id)?;
+    db::delete_item(item_id).map_err(map_anyhow)
+}
+
+#[uniffi::export]
+pub fn get_item_json_path(item_id: i64) -> Result<String, BackendError> {
+    ensure_item_id(item_id)?;
+    db::get_item_json_path(item_id).map_err(map_anyhow)
+}
+
 fn ensure_item_id(item_id: i64) -> Result<(), BackendError> {
     if item_id <= 0 {
         return Err(BackendError::Validation(

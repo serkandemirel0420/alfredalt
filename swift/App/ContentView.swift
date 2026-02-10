@@ -10,12 +10,42 @@ private let launcherSearchFieldCornerRadius: CGFloat = 12
 private let launcherShellPadding: CGFloat = 14
 private let launcherResultsCornerRadius: CGFloat = launcherShellCornerRadius - launcherShellPadding
 private let keyHandlingModifierMask: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
+private let actionMenuRowHeight: CGFloat = 44
 
 private struct LauncherShellHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = launcherEmptyHeight
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
+    }
+}
+
+private enum ItemAction: Int, CaseIterable {
+    case openEditor
+    case showJsonInFinder
+    case copyTitle
+    case delete
+
+    var label: String {
+        switch self {
+        case .openEditor: return "Open in Editor"
+        case .showJsonInFinder: return "Show JSON in Finder"
+        case .copyTitle: return "Copy Title"
+        case .delete: return "Delete"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .openEditor: return "doc.text"
+        case .showJsonInFinder: return "folder"
+        case .copyTitle: return "doc.on.doc"
+        case .delete: return "trash"
+        }
+    }
+
+    var isDestructive: Bool {
+        self == .delete
     }
 }
 
@@ -26,6 +56,18 @@ struct ContentView: View {
     @State private var selectedIndex = 0
     @State private var measuredShellHeight: CGFloat = launcherEmptyHeight
     @State private var resultsScrollProxy: ScrollViewProxy?
+    @State private var actionMenuTarget: SearchResultRecord?
+    @State private var actionMenuSelectedIndex = 0
+    @State private var actionMenuFilter = ""
+    @State private var savedQueryForActionMenu = ""
+
+    private var filteredActions: [ItemAction] {
+        let filter = actionMenuFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !filter.isEmpty else {
+            return ItemAction.allCases
+        }
+        return ItemAction.allCases.filter { $0.label.lowercased().contains(filter) }
+    }
 
     private var resultsViewportHeight: CGFloat {
         launcherResultRowHeight * launcherMaxVisibleRows
@@ -54,9 +96,11 @@ struct ContentView: View {
             }
         )
         .background(
-            KeyEventMonitor { event in
+            KeyEventMonitor(onKeyDown: { event in
                 return handleLauncherKeyEvent(event)
-            }
+            }, onCmdTap: {
+                handleCmdTap()
+            })
         )
         .onPreferenceChange(LauncherShellHeightPreferenceKey.self) { value in
             if abs(measuredShellHeight - value) > 0.5 {
@@ -67,9 +111,14 @@ struct ContentView: View {
             searchFieldFocused = true
         }
         .onChange(of: viewModel.query) { _, _ in
-            if selectedIndex != 0 {
-                selectedIndex = 0
+            if actionMenuTarget == nil {
+                if selectedIndex != 0 {
+                    selectedIndex = 0
+                }
             }
+        }
+        .onChange(of: actionMenuFilter) { _, _ in
+            actionMenuSelectedIndex = 0
         }
         .onChange(of: viewModel.results) { _, _ in
             if viewModel.results.isEmpty {
@@ -102,13 +151,32 @@ struct ContentView: View {
     private func launcherShell(width: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                TextField("Type to search...", text: $viewModel.query)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 30, weight: .regular))
-                    .focused($searchFieldFocused)
-                    .onSubmit {
+                TextField(
+                    actionMenuTarget != nil ? "Filter actions..." : "Type to search...",
+                    text: Binding(
+                        get: { actionMenuTarget != nil ? actionMenuFilter : viewModel.query },
+                        set: { newValue in
+                            if actionMenuTarget != nil {
+                                actionMenuFilter = newValue
+                            } else {
+                                viewModel.query = newValue
+                            }
+                        }
+                    )
+                )
+                .textFieldStyle(.plain)
+                .font(.system(size: 30, weight: .regular))
+                .focused($searchFieldFocused)
+                .onSubmit {
+                    if let target = actionMenuTarget {
+                        let actions = filteredActions
+                        if actions.indices.contains(actionMenuSelectedIndex) {
+                            executeAction(actions[actionMenuSelectedIndex], on: target)
+                        }
+                    } else {
                         activateCurrentSelection()
                     }
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -129,7 +197,9 @@ struct ContentView: View {
             let trimmedQuery = viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines)
             let showResults = !trimmedQuery.isEmpty
             Group {
-                if showResults {
+                if let target = actionMenuTarget {
+                    actionMenuView(for: target)
+                } else if showResults {
                     if viewModel.results.isEmpty {
                         Text("No matching results. Press Enter to add this as a new entry.")
                             .font(.system(size: 13))
@@ -174,11 +244,11 @@ struct ContentView: View {
                     }
                 }
             }
-            .padding(.top, showResults ? 8 : 0)
+            .padding(.top, showResults || actionMenuTarget != nil ? 8 : 0)
             .frame(
                 maxWidth: .infinity,
-                minHeight: showResults ? resultsViewportHeight : 0,
-                maxHeight: showResults ? resultsViewportHeight : 0,
+                minHeight: showResults || actionMenuTarget != nil ? resultsViewportHeight : 0,
+                maxHeight: showResults || actionMenuTarget != nil ? resultsViewportHeight : 0,
                 alignment: .top
             )
             .clipped()
@@ -227,8 +297,156 @@ struct ContentView: View {
         }
     }
 
+    private func handleCmdTap() {
+        if actionMenuTarget != nil {
+            dismissActionMenu()
+            return
+        }
+
+        guard viewModel.results.indices.contains(selectedIndex) else {
+            return
+        }
+
+        let target = viewModel.results[selectedIndex]
+        savedQueryForActionMenu = viewModel.query
+        actionMenuTarget = target
+        actionMenuSelectedIndex = 0
+        actionMenuFilter = ""
+        viewModel.query = ""
+        searchFieldFocused = true
+    }
+
+    private func dismissActionMenu() {
+        actionMenuTarget = nil
+        actionMenuSelectedIndex = 0
+        actionMenuFilter = ""
+        viewModel.query = savedQueryForActionMenu
+        savedQueryForActionMenu = ""
+        searchFieldFocused = true
+    }
+
+    private func actionMenuView(for target: SearchResultRecord) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "ellipsis.circle.fill")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Color(white: 100 / 255))
+                Text(target.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color(white: 50 / 255))
+                    .lineLimit(1)
+                Spacer()
+                Text("⌘ to go back")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(white: 140 / 255))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color(white: 240 / 255))
+
+            Divider()
+
+            let actions = filteredActions
+            if actions.isEmpty {
+                Text("No matching actions")
+                    .font(.system(size: 13))
+                    .italic()
+                    .foregroundStyle(Color(white: 95 / 255))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+            } else {
+                ForEach(Array(actions.enumerated()), id: \.element.rawValue) { idx, action in
+                    let isSelected = idx == actionMenuSelectedIndex
+                    Button {
+                        executeAction(action, on: target)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: action.systemImage)
+                                .font(.system(size: 15))
+                                .frame(width: 22)
+                                .foregroundStyle(action.isDestructive ? Color.red : Color(white: 60 / 255))
+                            Text(action.label)
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundStyle(action.isDestructive ? Color.red : Color(white: 30 / 255))
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(isSelected ? Color(red: 230 / 255, green: 236 / 255, blue: 245 / 255) : Color.clear)
+                    }
+                    .buttonStyle(.plain)
+
+                    if idx + 1 < actions.count {
+                        Divider().padding(.leading, 44)
+                    }
+                }
+            }
+        }
+    }
+
+    private func executeAction(_ action: ItemAction, on target: SearchResultRecord) {
+        let savedQuery = savedQueryForActionMenu
+        actionMenuTarget = nil
+        actionMenuSelectedIndex = 0
+        actionMenuFilter = ""
+        viewModel.query = savedQuery
+        savedQueryForActionMenu = ""
+        searchFieldFocused = true
+
+        switch action {
+        case .openEditor:
+            if let idx = viewModel.results.firstIndex(where: { $0.id == target.id }) {
+                selectedIndex = idx
+                activateResult(at: idx)
+            }
+        case .showJsonInFinder:
+            viewModel.revealItemJsonInFinder(itemId: target.id)
+        case .copyTitle:
+            viewModel.copyItemTitle(target.title)
+        case .delete:
+            Task {
+                await viewModel.deleteItem(itemId: target.id)
+            }
+        }
+    }
+
     private func handleLauncherKeyEvent(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(keyHandlingModifierMask)
+
+        // Handle action menu key events
+        if actionMenuTarget != nil {
+            if !modifiers.isEmpty {
+                return false
+            }
+            switch event.keyCode {
+            case 126: // up
+                if actionMenuSelectedIndex > 0 {
+                    actionMenuSelectedIndex -= 1
+                }
+                return true
+            case 125: // down
+                let actions = filteredActions
+                if actionMenuSelectedIndex + 1 < actions.count {
+                    actionMenuSelectedIndex += 1
+                }
+                return true
+            case 36, 76: // return / enter
+                if let target = actionMenuTarget {
+                    let actions = filteredActions
+                    if actions.indices.contains(actionMenuSelectedIndex) {
+                        executeAction(actions[actionMenuSelectedIndex], on: target)
+                    }
+                }
+                return true
+            case 53: // escape
+                dismissActionMenu()
+                return true
+            default:
+                return false
+            }
+        }
+
         if !modifiers.isEmpty {
             return false
         }

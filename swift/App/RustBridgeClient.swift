@@ -28,4 +28,12 @@ enum RustBridgeClient {
     static func saveJsonStorageDirectoryPath(_ path: String) throws {
         try saveJsonStoragePath(path: path)
     }
+
+    static func delete(itemId: Int64) throws {
+        try deleteItem(itemId: itemId)
+    }
+
+    static func getJsonPath(itemId: Int64) throws -> String {
+        try getItemJsonPath(itemId: itemId)
+    }
 }

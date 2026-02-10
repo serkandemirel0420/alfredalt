@@ -1071,6 +1071,12 @@ public func createItem(title: String)throws  -> Int64  {
     )
 })
 }
+public func deleteItem(itemId: Int64)throws   {try rustCallWithError(FfiConverterTypeBackendError_lift) {
+    uniffi_alfred_alt_fn_func_delete_item(
+        FfiConverterInt64.lower(itemId),$0
+    )
+}
+}
 public func exportItems()throws  -> [ExportItemRecord]  {
     return try  FfiConverterSequenceTypeExportItemRecord.lift(try rustCallWithError(FfiConverterTypeBackendError_lift) {
     uniffi_alfred_alt_fn_func_export_items($0
@@ -1080,6 +1086,13 @@ public func exportItems()throws  -> [ExportItemRecord]  {
 public func getItem(itemId: Int64)throws  -> EditableItemRecord  {
     return try  FfiConverterTypeEditableItemRecord_lift(try rustCallWithError(FfiConverterTypeBackendError_lift) {
     uniffi_alfred_alt_fn_func_get_item(
+        FfiConverterInt64.lower(itemId),$0
+    )
+})
+}
+public func getItemJsonPath(itemId: Int64)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeBackendError_lift) {
+    uniffi_alfred_alt_fn_func_get_item_json_path(
         FfiConverterInt64.lower(itemId),$0
     )
 })
@@ -1146,10 +1159,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_alfred_alt_checksum_func_create_item() != 4631) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_alfred_alt_checksum_func_delete_item() != 34952) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_alfred_alt_checksum_func_export_items() != 36696) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_alfred_alt_checksum_func_get_item() != 23813) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_alfred_alt_checksum_func_get_item_json_path() != 32002) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_alfred_alt_checksum_func_load_hotkey() != 36564) {

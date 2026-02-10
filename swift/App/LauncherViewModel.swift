@@ -366,6 +366,41 @@ final class LauncherViewModel: ObservableObject {
         return true
     }
 
+    func deleteItem(itemId: Int64) async {
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try RustBridgeClient.delete(itemId: itemId)
+            }.value
+
+            if selectedItem?.id == itemId {
+                selectedItem = nil
+                editorText = ""
+                isEditorPresented = false
+            }
+
+            refreshSearchForCurrentQuery()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func revealItemJsonInFinder(itemId: Int64) {
+        do {
+            let path = try RustBridgeClient.getJsonPath(itemId: itemId)
+            let url = URL(fileURLWithPath: path)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func copyItemTitle(_ title: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(title, forType: .string)
+    }
+
     func persistEditorState() async {
         _ = await saveCurrentItem()
     }

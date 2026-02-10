@@ -115,10 +115,19 @@ private final class ResizableImageTextView: NSTextView {
 
         let attrs = storage.attributes(at: charIndex, effectiveRange: nil)
         guard let key = attrs[imageKeyAttribute] as? String,
-              let width = attrs[imageWidthAttribute] as? Int,
               attrs[.attachment] is NSTextAttachment
         else {
             return nil
+        }
+
+        // Use stored width if available, otherwise fall back to the rendered attachment width
+        let width: Int
+        if let stored = attrs[imageWidthAttribute] as? Int {
+            width = stored
+        } else {
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            width = Int(rect.width.rounded())
         }
 
         let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
@@ -773,47 +782,39 @@ private func imageWithBorder(_ image: NSImage) -> NSImage {
 
     // Draw resize grip icon at bottom-right corner
     // In NSImage coordinate system, (0,0) is bottom-left
-    let gripColor = NSColor.secondaryLabelColor.withAlphaComponent(0.6)
-    gripColor.setStroke()
 
-    let gripInset: CGFloat = 5
-    let gripLineSpacing: CGFloat = 3.5
-    let gripLineCount = 3
-
-    for i in 0..<gripLineCount {
-        let offset = CGFloat(i) * gripLineSpacing
-        let line = NSBezierPath()
-        line.lineWidth = 1.2
-        line.lineCapStyle = .round
-        // Diagonal lines from bottom-right corner going up-left
-        line.move(to: NSPoint(
-            x: framedSize.width - gripInset,
-            y: gripInset + offset
-        ))
-        line.line(to: NSPoint(
-            x: framedSize.width - gripInset - (CGFloat(gripLineCount - 1) - CGFloat(i)) * gripLineSpacing,
-            y: gripInset
-        ))
-        line.stroke()
-    }
-
-    // Draw a small triangular background behind the grip for visibility
+    // Draw a triangular background behind the grip for visibility
     let trianglePath = NSBezierPath()
-    let triSize: CGFloat = 14
+    let triSize: CGFloat = 20
     trianglePath.move(to: NSPoint(x: framedSize.width, y: 0))
     trianglePath.line(to: NSPoint(x: framedSize.width, y: triSize))
     trianglePath.line(to: NSPoint(x: framedSize.width - triSize, y: 0))
     trianglePath.close()
-    NSColor.windowBackgroundColor.withAlphaComponent(0.7).setFill()
+    NSColor.windowBackgroundColor.withAlphaComponent(0.92).setFill()
     trianglePath.fill()
 
-    // Re-draw grip lines on top of the triangle background
+    // Subtle border on the triangle edge
+    NSColor.separatorColor.withAlphaComponent(0.4).setStroke()
+    let triEdge = NSBezierPath()
+    triEdge.lineWidth = 0.5
+    triEdge.move(to: NSPoint(x: framedSize.width, y: triSize))
+    triEdge.line(to: NSPoint(x: framedSize.width - triSize, y: 0))
+    triEdge.stroke()
+
+    // Draw grip lines on top
+    let gripColor = NSColor.secondaryLabelColor
     gripColor.setStroke()
+
+    let gripInset: CGFloat = 4
+    let gripLineSpacing: CGFloat = 3.5
+    let gripLineCount = 4
+
     for i in 0..<gripLineCount {
         let offset = CGFloat(i) * gripLineSpacing
         let line = NSBezierPath()
-        line.lineWidth = 1.2
+        line.lineWidth = 1.8
         line.lineCapStyle = .round
+        // Diagonal lines from bottom-right corner going up-left
         line.move(to: NSPoint(
             x: framedSize.width - gripInset,
             y: gripInset + offset

@@ -262,6 +262,11 @@ RustBuffer uniffi_alfred_alt_fn_func_backend_version(RustCallStatus *_Nonnull ou
 int64_t uniffi_alfred_alt_fn_func_create_item(RustBuffer title, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_DELETE_ITEM
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_DELETE_ITEM
+void uniffi_alfred_alt_fn_func_delete_item(int64_t item_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_EXPORT_ITEMS
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_EXPORT_ITEMS
 RustBuffer uniffi_alfred_alt_fn_func_export_items(RustCallStatus *_Nonnull out_status
@@ -271,6 +276,11 @@ RustBuffer uniffi_alfred_alt_fn_func_export_items(RustCallStatus *_Nonnull out_s
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_GET_ITEM
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_GET_ITEM
 RustBuffer uniffi_alfred_alt_fn_func_get_item(int64_t item_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_GET_ITEM_JSON_PATH
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_GET_ITEM_JSON_PATH
+RustBuffer uniffi_alfred_alt_fn_func_get_item_json_path(int64_t item_id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_LOAD_HOTKEY
@@ -597,6 +607,12 @@ uint16_t uniffi_alfred_alt_checksum_func_create_item(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_DELETE_ITEM
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_DELETE_ITEM
+uint16_t uniffi_alfred_alt_checksum_func_delete_item(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_EXPORT_ITEMS
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_EXPORT_ITEMS
 uint16_t uniffi_alfred_alt_checksum_func_export_items(void
@@ -606,6 +622,12 @@ uint16_t uniffi_alfred_alt_checksum_func_export_items(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_GET_ITEM
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_GET_ITEM
 uint16_t uniffi_alfred_alt_checksum_func_get_item(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_GET_ITEM_JSON_PATH
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_GET_ITEM_JSON_PATH
+uint16_t uniffi_alfred_alt_checksum_func_get_item_json_path(void
     
 );
 #endif
