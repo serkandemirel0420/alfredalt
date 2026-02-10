@@ -6,6 +6,9 @@ private let imageKeyAttribute = NSAttributedString.Key("InlineImageKey")
 private let imageWidthAttribute = NSAttributedString.Key("InlineImageWidth")
 private let editorDefaultFontSize: CGFloat = 15
 private let editorTextColor = NSColor.labelColor
+private let resizeHandleSize: CGFloat = 24
+private let minImageWidth: CGFloat = 140
+private let maxImageWidth: CGFloat = 1200
 
 private func editorFont(for fontSize: CGFloat) -> NSFont {
     NSFont.systemFont(ofSize: fontSize)
@@ -16,6 +19,382 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
         .font: editorFont(for: fontSize),
         .foregroundColor: editorTextColor,
     ]
+}
+
+// MARK: - Resize drag state
+
+private struct ImageResizeDragState {
+    let attachmentCharIndex: Int
+    let imageKey: String
+    let originalWidth: CGFloat
+    let originalImageData: Data
+    let mouseDownPoint: NSPoint
+}
+
+// MARK: - Resizable NSTextView subclass
+
+private struct ImageMoveDragState {
+    let attachmentCharIndex: Int
+    let imageKey: String
+    let mouseDownPoint: NSPoint
+    var didStartDrag: Bool
+}
+
+private final class ResizableImageTextView: NSTextView {
+    weak var resizeDelegate: ImageResizeDelegate?
+
+    private var dragState: ImageResizeDragState?
+    private var moveDragState: ImageMoveDragState?
+    private var cursorState: CursorOverlay = .none
+    private let moveDragThreshold: CGFloat = 5
+
+    private enum CursorOverlay {
+        case none
+        case resizeHandle
+        case imageBody
+    }
+
+    // MARK: Hit-testing helpers
+
+    /// Checks if the point is on any image attachment and returns its char index and key.
+    private func imageAttachmentAt(point: NSPoint) -> (charIndex: Int, imageKey: String)? {
+        guard let layoutManager = layoutManager,
+              let textContainer = textContainer,
+              let storage = textStorage
+        else {
+            return nil
+        }
+
+        let charIndex = layoutManager.characterIndex(
+            for: point,
+            in: textContainer,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+
+        guard charIndex < storage.length else {
+            return nil
+        }
+
+        let attrs = storage.attributes(at: charIndex, effectiveRange: nil)
+        guard let key = attrs[imageKeyAttribute] as? String,
+              attrs[.attachment] is NSTextAttachment
+        else {
+            return nil
+        }
+
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
+        let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        let rectInView = rect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+
+        guard rectInView.contains(point) else {
+            return nil
+        }
+
+        return (charIndex, key)
+    }
+
+    /// Returns the character index and attachment rect for an image attachment at the given point, if
+    /// the point falls within the resize handle zone (bottom-right corner of the image).
+    private func imageResizeHitTest(at point: NSPoint) -> (charIndex: Int, imageKey: String, width: Int, rect: NSRect)? {
+        guard let layoutManager = layoutManager,
+              let textContainer = textContainer,
+              let storage = textStorage
+        else {
+            return nil
+        }
+
+        let charIndex = layoutManager.characterIndex(
+            for: point,
+            in: textContainer,
+            fractionOfDistanceBetweenInsertionPoints: nil
+        )
+
+        guard charIndex < storage.length else {
+            return nil
+        }
+
+        let attrs = storage.attributes(at: charIndex, effectiveRange: nil)
+        guard let key = attrs[imageKeyAttribute] as? String,
+              let width = attrs[imageWidthAttribute] as? Int,
+              attrs[.attachment] is NSTextAttachment
+        else {
+            return nil
+        }
+
+        let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
+        let attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+        let rectInView = attachmentRect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+
+        // Check if point is inside the attachment rect
+        guard rectInView.contains(point) else {
+            return nil
+        }
+
+        // Check if point is within the bottom-right corner resize handle
+        let handleZone = NSRect(
+            x: rectInView.maxX - resizeHandleSize,
+            y: rectInView.maxY - resizeHandleSize,
+            width: resizeHandleSize,
+            height: resizeHandleSize
+        )
+
+        guard handleZone.contains(point) else {
+            return nil
+        }
+
+        return (charIndex, key, width, rectInView)
+    }
+
+    // MARK: Mouse events
+
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+
+        if imageResizeHitTest(at: point) != nil {
+            if cursorState != .resizeHandle {
+                if cursorState != .none { NSCursor.pop() }
+                cursorState = .resizeHandle
+                NSCursor.crosshair.push()
+            }
+        } else if imageAttachmentAt(point: point) != nil {
+            if cursorState != .imageBody {
+                if cursorState != .none { NSCursor.pop() }
+                cursorState = .imageBody
+                NSCursor.openHand.push()
+            }
+        } else {
+            if cursorState != .none {
+                NSCursor.pop()
+                cursorState = .none
+            }
+        }
+
+        super.mouseMoved(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+
+        // Priority 1: Resize handle click
+        if let hit = imageResizeHitTest(at: point),
+           let imageData = resizeDelegate?.originalImageData(forKey: hit.imageKey) {
+            dragState = ImageResizeDragState(
+                attachmentCharIndex: hit.charIndex,
+                imageKey: hit.imageKey,
+                originalWidth: CGFloat(hit.width),
+                originalImageData: imageData,
+                mouseDownPoint: point
+            )
+            return
+        }
+
+        // Priority 2: Image body click → start potential move
+        if let hit = imageAttachmentAt(point: point) {
+            moveDragState = ImageMoveDragState(
+                attachmentCharIndex: hit.charIndex,
+                imageKey: hit.imageKey,
+                mouseDownPoint: point,
+                didStartDrag: false
+            )
+            // Select the attachment so it's visually highlighted
+            setSelectedRange(NSRange(location: hit.charIndex, length: 1))
+            return
+        }
+
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        // Resize drag
+        if let state = dragState {
+            let point = convert(event.locationInWindow, from: nil)
+            let deltaX = point.x - state.mouseDownPoint.x
+            let deltaY = point.y - state.mouseDownPoint.y
+            let diagonalDelta = (deltaX + deltaY) / 2.0
+            let newWidth = min(max(state.originalWidth + diagonalDelta, minImageWidth), maxImageWidth)
+            updateImageAttachment(state: state, newWidth: newWidth)
+            return
+        }
+
+        // Move drag
+        if moveDragState != nil {
+            let point = convert(event.locationInWindow, from: nil)
+            let distance = hypot(point.x - moveDragState!.mouseDownPoint.x, point.y - moveDragState!.mouseDownPoint.y)
+
+            if distance > moveDragThreshold {
+                if !moveDragState!.didStartDrag {
+                    moveDragState!.didStartDrag = true
+                    NSCursor.closedHand.push()
+                }
+
+                // Show insertion point at current mouse position
+                guard let layoutManager = layoutManager, let textContainer = textContainer else { return }
+                let adjustedPoint = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+                let insertIndex = layoutManager.characterIndex(
+                    for: adjustedPoint,
+                    in: textContainer,
+                    fractionOfDistanceBetweenInsertionPoints: nil
+                )
+                let safeIndex = max(0, min(insertIndex, (textStorage?.length ?? 0)))
+                setSelectedRange(NSRange(location: safeIndex, length: 0))
+            }
+            return
+        }
+
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        // Resize complete
+        if let state = dragState {
+            let point = convert(event.locationInWindow, from: nil)
+            let deltaX = point.x - state.mouseDownPoint.x
+            let deltaY = point.y - state.mouseDownPoint.y
+            let diagonalDelta = (deltaX + deltaY) / 2.0
+            let newWidth = min(max(state.originalWidth + diagonalDelta, minImageWidth), maxImageWidth)
+
+            dragState = nil
+            updateImageAttachment(state: state, newWidth: newWidth)
+            resizeDelegate?.imageDidResize()
+            return
+        }
+
+        // Move complete
+        if let moveState = moveDragState {
+            moveDragState = nil
+
+            if moveState.didStartDrag {
+                NSCursor.pop()
+
+                let point = convert(event.locationInWindow, from: nil)
+                guard let layoutManager = layoutManager, let textContainer = textContainer else { return }
+                let adjustedPoint = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+                let dropIndex = layoutManager.characterIndex(
+                    for: adjustedPoint,
+                    in: textContainer,
+                    fractionOfDistanceBetweenInsertionPoints: nil
+                )
+                let safeDropIndex = max(0, min(dropIndex, (textStorage?.length ?? 0)))
+
+                // Only move if dropped at a different position
+                if safeDropIndex != moveState.attachmentCharIndex && safeDropIndex != moveState.attachmentCharIndex + 1 {
+                    moveImageAttachment(from: moveState.attachmentCharIndex, to: safeDropIndex)
+                    resizeDelegate?.imageDidResize()
+                }
+            }
+            return
+        }
+
+        super.mouseUp(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if cursorState != .none {
+            NSCursor.pop()
+            cursorState = .none
+        }
+        super.mouseExited(with: event)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+
+        // Remove old tracking areas
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+
+        // Add a tracking area covering the whole text view
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+    }
+
+    // MARK: Prevent default attachment drag-and-drop
+
+    override func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        // Disable the default NSTextView drag-and-drop for attachments
+        return []
+    }
+
+    // MARK: Image resize
+
+    private func updateImageAttachment(state: ImageResizeDragState, newWidth: CGFloat) {
+        guard let storage = textStorage,
+              state.attachmentCharIndex < storage.length
+        else {
+            return
+        }
+
+        let attrs = storage.attributes(at: state.attachmentCharIndex, effectiveRange: nil)
+        guard attrs[imageKeyAttribute] as? String == state.imageKey else {
+            return
+        }
+
+        guard let originalImage = NSImage(data: state.originalImageData) else {
+            return
+        }
+
+        let resized = resizedImage(originalImage, targetWidth: newWidth)
+        let framed = imageWithBorder(resized)
+        let attachment = NSTextAttachment()
+        attachment.image = framed
+        attachment.bounds = NSRect(origin: .zero, size: framed.size)
+
+        let range = NSRange(location: state.attachmentCharIndex, length: 1)
+
+        storage.beginEditing()
+        let attachmentString = NSMutableAttributedString(attachment: attachment)
+        attachmentString.addAttributes([
+            imageKeyAttribute: state.imageKey,
+            imageWidthAttribute: Int(newWidth.rounded()),
+        ], range: NSRange(location: 0, length: attachmentString.length))
+        storage.replaceCharacters(in: range, with: attachmentString)
+        storage.endEditing()
+    }
+
+    // MARK: Image move
+
+    private func moveImageAttachment(from sourceIndex: Int, to rawDestIndex: Int) {
+        guard let storage = textStorage,
+              sourceIndex < storage.length
+        else {
+            return
+        }
+
+        // Copy the attachment's attributed string (with all custom attributes)
+        let attachmentAttrStr = storage.attributedSubstring(from: NSRange(location: sourceIndex, length: 1))
+
+        // Remove the attachment from the old position
+        storage.beginEditing()
+        storage.deleteCharacters(in: NSRange(location: sourceIndex, length: 1))
+
+        // Adjust destination index since we removed a character
+        var destIndex = rawDestIndex
+        if destIndex > sourceIndex {
+            destIndex -= 1
+        }
+        destIndex = max(0, min(destIndex, storage.length))
+
+        // Insert at the new position
+        storage.insert(attachmentAttrStr, at: destIndex)
+        storage.endEditing()
+
+        // Place cursor after the moved image
+        let cursorPos = min(destIndex + 1, storage.length)
+        setSelectedRange(NSRange(location: cursorPos, length: 0))
+    }
+}
+
+// MARK: - Resize delegate protocol
+
+private protocol ImageResizeDelegate: AnyObject {
+    func originalImageData(forKey key: String) -> Data?
+    func imageDidResize()
 }
 
 struct InlineImageTextEditor: NSViewRepresentable {
@@ -37,8 +416,9 @@ struct InlineImageTextEditor: NSViewRepresentable {
         scrollView.drawsBackground = false
         scrollView.autohidesScrollers = true
 
-        let textView = NSTextView()
+        let textView = ResizableImageTextView()
         textView.delegate = context.coordinator
+        textView.resizeDelegate = context.coordinator
         textView.isEditable = true
         textView.isSelectable = true
         textView.isRichText = true
@@ -72,7 +452,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
         context.coordinator.renderIfNeeded(force: false)
     }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
+    final class Coordinator: NSObject, NSTextViewDelegate, ImageResizeDelegate {
         var parent: InlineImageTextEditor
         weak var textView: NSTextView?
 
@@ -83,6 +463,27 @@ struct InlineImageTextEditor: NSViewRepresentable {
 
         init(parent: InlineImageTextEditor) {
             self.parent = parent
+        }
+
+        // MARK: ImageResizeDelegate
+
+        func originalImageData(forKey key: String) -> Data? {
+            parent.imagesByKey[key]
+        }
+
+        func imageDidResize() {
+            guard let textView else { return }
+
+            isApplyingProgrammaticUpdate = true
+            normalizeVisibleTextAttributes(in: textView, fontSize: parent.fontSize)
+            applyEditorTypingAppearance(to: textView, fontSize: parent.fontSize)
+            isApplyingProgrammaticUpdate = false
+
+            let plain = makePlainText(from: textView.attributedString())
+            if plain != parent.text {
+                parent.text = plain
+                lastRenderedText = plain
+            }
         }
 
         func renderIfNeeded(force: Bool) {
@@ -332,7 +733,7 @@ private func resizedImage(_ image: NSImage, targetWidth: CGFloat) -> NSImage {
         return image
     }
 
-    let clampedWidth = min(max(targetWidth, 140), 1200)
+    let clampedWidth = min(max(targetWidth, minImageWidth), maxImageWidth)
     let ratio = clampedWidth / image.size.width
     let targetHeight = max(1, image.size.height * ratio)
     let targetSize = NSSize(width: clampedWidth, height: targetHeight)
@@ -369,6 +770,60 @@ private func imageWithBorder(_ image: NSImage) -> NSImage {
     let borderPath = NSBezierPath(rect: NSRect(x: 0.5, y: 0.5, width: framedSize.width - 1, height: framedSize.height - 1))
     borderPath.lineWidth = 1
     borderPath.stroke()
+
+    // Draw resize grip icon at bottom-right corner
+    // In NSImage coordinate system, (0,0) is bottom-left
+    let gripColor = NSColor.secondaryLabelColor.withAlphaComponent(0.6)
+    gripColor.setStroke()
+
+    let gripInset: CGFloat = 5
+    let gripLineSpacing: CGFloat = 3.5
+    let gripLineCount = 3
+
+    for i in 0..<gripLineCount {
+        let offset = CGFloat(i) * gripLineSpacing
+        let line = NSBezierPath()
+        line.lineWidth = 1.2
+        line.lineCapStyle = .round
+        // Diagonal lines from bottom-right corner going up-left
+        line.move(to: NSPoint(
+            x: framedSize.width - gripInset,
+            y: gripInset + offset
+        ))
+        line.line(to: NSPoint(
+            x: framedSize.width - gripInset - (CGFloat(gripLineCount - 1) - CGFloat(i)) * gripLineSpacing,
+            y: gripInset
+        ))
+        line.stroke()
+    }
+
+    // Draw a small triangular background behind the grip for visibility
+    let trianglePath = NSBezierPath()
+    let triSize: CGFloat = 14
+    trianglePath.move(to: NSPoint(x: framedSize.width, y: 0))
+    trianglePath.line(to: NSPoint(x: framedSize.width, y: triSize))
+    trianglePath.line(to: NSPoint(x: framedSize.width - triSize, y: 0))
+    trianglePath.close()
+    NSColor.windowBackgroundColor.withAlphaComponent(0.7).setFill()
+    trianglePath.fill()
+
+    // Re-draw grip lines on top of the triangle background
+    gripColor.setStroke()
+    for i in 0..<gripLineCount {
+        let offset = CGFloat(i) * gripLineSpacing
+        let line = NSBezierPath()
+        line.lineWidth = 1.2
+        line.lineCapStyle = .round
+        line.move(to: NSPoint(
+            x: framedSize.width - gripInset,
+            y: gripInset + offset
+        ))
+        line.line(to: NSPoint(
+            x: framedSize.width - gripInset - (CGFloat(gripLineCount - 1) - CGFloat(i)) * gripLineSpacing,
+            y: gripInset
+        ))
+        line.stroke()
+    }
 
     return framed
 }
