@@ -59,7 +59,6 @@ struct ContentView: View {
     @State private var actionMenuTarget: SearchResultRecord?
     @State private var actionMenuSelectedIndex = 0
     @State private var actionMenuFilter = ""
-    @State private var savedQueryForActionMenu = ""
 
     private var filteredActions: [ItemAction] {
         let filter = actionMenuFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -307,12 +306,9 @@ struct ContentView: View {
             return
         }
 
-        let target = viewModel.results[selectedIndex]
-        savedQueryForActionMenu = viewModel.query
-        actionMenuTarget = target
+        actionMenuTarget = viewModel.results[selectedIndex]
         actionMenuSelectedIndex = 0
         actionMenuFilter = ""
-        viewModel.query = ""
         searchFieldFocused = true
     }
 
@@ -320,8 +316,6 @@ struct ContentView: View {
         actionMenuTarget = nil
         actionMenuSelectedIndex = 0
         actionMenuFilter = ""
-        viewModel.query = savedQueryForActionMenu
-        savedQueryForActionMenu = ""
         searchFieldFocused = true
     }
 
@@ -386,12 +380,9 @@ struct ContentView: View {
     }
 
     private func executeAction(_ action: ItemAction, on target: SearchResultRecord) {
-        let savedQuery = savedQueryForActionMenu
         actionMenuTarget = nil
         actionMenuSelectedIndex = 0
         actionMenuFilter = ""
-        viewModel.query = savedQuery
-        savedQueryForActionMenu = ""
         searchFieldFocused = true
 
         switch action {
