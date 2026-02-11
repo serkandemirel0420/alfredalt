@@ -934,15 +934,27 @@ fn substring_search_rows(
         return Vec::new();
     }
 
+    let tokens: Vec<&str> = query.split_whitespace().collect();
+
     let mut output = Vec::new();
     for item in items {
         if seen_ids.contains(&item.id) {
             continue;
         }
 
-        if contains_case_insensitive(&item.title, query)
-            || contains_case_insensitive(&item.note, query)
-        {
+        let matches = if tokens.len() <= 1 {
+            contains_case_insensitive(&item.title, query)
+                || contains_case_insensitive(&item.note, query)
+        } else {
+            let title_lower = item.title.to_lowercase();
+            let note_lower = item.note.to_lowercase();
+            tokens.iter().all(|token| {
+                let t = token.to_lowercase();
+                title_lower.contains(&t) || note_lower.contains(&t)
+            })
+        };
+
+        if matches {
             output.push(map_search_item(item, query_terms, None));
             if output.len() >= limit {
                 break;
