@@ -136,13 +136,6 @@ final class LauncherViewModel: ObservableObject {
         launcherWindow.makeKeyAndOrderFront(nil)
         launcherWindow.orderFrontRegardless()
         launcherFocusRequestID &+= 1
-        DispatchQueue.main.async { [weak self] in
-            guard let self else {
-                return
-            }
-            self.launcherWindow?.makeKeyAndOrderFront(nil)
-            self.launcherFocusRequestID &+= 1
-        }
     }
 
     func toggleLauncherVisibilityFromHotKey() {

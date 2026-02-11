@@ -24,12 +24,12 @@ struct WindowConfigurator: NSViewRepresentable {
         }
 
         configure(window: window, coordinator: context.coordinator)
-        onWindowResolved?(window)
     }
 
     private func configure(window: NSWindow, coordinator: Coordinator) {
         if !coordinator.configured {
             coordinator.configured = true
+            onWindowResolved?(window)
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.isOpaque = false
