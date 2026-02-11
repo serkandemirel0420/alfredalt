@@ -256,6 +256,7 @@ struct ContentView: View {
         .padding(launcherShellPadding)
         .frame(width: width)
         .background(Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255))
+        .overlay(WindowDragHandle(inset: launcherShellPadding))
         .overlay(
             RoundedRectangle(cornerRadius: launcherShellCornerRadius, style: .continuous)
                 .stroke(Color.black.opacity(35 / 255), lineWidth: 1)
@@ -524,6 +525,55 @@ private struct WindowAccessor: NSViewRepresentable {
                 onResolve(window)
             }
         }
+    }
+}
+
+private struct WindowDragHandle: NSViewRepresentable {
+    let inset: CGFloat
+
+    final class DraggableNSView: NSView {
+        var inset: CGFloat = 0
+        private var initialMouseLocation: NSPoint?
+        private var initialWindowOrigin: NSPoint?
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let innerRect = bounds.insetBy(dx: inset, dy: inset)
+            if innerRect.contains(point) {
+                return nil
+            }
+            return self
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            initialMouseLocation = NSEvent.mouseLocation
+            initialWindowOrigin = window?.frame.origin
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard let initialMouseLocation, let initialWindowOrigin, let window else { return }
+            let currentLocation = NSEvent.mouseLocation
+            let dx = currentLocation.x - initialMouseLocation.x
+            let dy = currentLocation.y - initialMouseLocation.y
+            window.setFrameOrigin(NSPoint(
+                x: initialWindowOrigin.x + dx,
+                y: initialWindowOrigin.y + dy
+            ))
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            initialMouseLocation = nil
+            initialWindowOrigin = nil
+        }
+    }
+
+    func makeNSView(context: Context) -> DraggableNSView {
+        let view = DraggableNSView(frame: .zero)
+        view.inset = inset
+        return view
+    }
+
+    func updateNSView(_ nsView: DraggableNSView, context: Context) {
+        nsView.inset = inset
     }
 }
 
