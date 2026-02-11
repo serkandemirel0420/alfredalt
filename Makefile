@@ -55,7 +55,7 @@ build-app: bridge
 		-Xcc -fmodule-map-file=swift/RustBridge/Generated/alfred_alt.modulemap \
 		"$$LIB_PATH" \
 		-o $(APP_BINARY)
-	@codesign --force --deep --sign - $(APP_BUNDLE)
+	@codesign --force --deep --sign - --entitlements entitlements.plist $(APP_BUNDLE)
 
 run:
 	$(MAKE) build-app

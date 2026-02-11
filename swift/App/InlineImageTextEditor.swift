@@ -471,6 +471,7 @@ private protocol ImageResizeDelegate: AnyObject {
 struct InlineImageTextEditor: NSViewRepresentable {
     @Binding var text: String
     var imagesByKey: [String: Data]
+    var searchQuery: String = ""
     var defaultImageWidth: CGFloat = 360
     var fontSize: CGFloat = editorDefaultFontSize
     var onSelectionChange: ((Int?) -> Void)?
@@ -529,6 +530,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
 
         private var isApplyingProgrammaticUpdate = false
         private var lastRenderedText: String = ""
+        private var lastRenderedQuery: String = ""
         private var lastImageSignature: Int = 0
         private var lastRenderedFontSize: CGFloat = editorDefaultFontSize
 
@@ -564,7 +566,8 @@ struct InlineImageTextEditor: NSViewRepresentable {
 
             let signature = imageSignature(parent.imagesByKey)
             let fontSizeChanged = abs(parent.fontSize - lastRenderedFontSize) > 0.01
-            guard force || parent.text != lastRenderedText || signature != lastImageSignature || fontSizeChanged else {
+            let queryChanged = parent.searchQuery != lastRenderedQuery
+            guard force || parent.text != lastRenderedText || signature != lastImageSignature || fontSizeChanged || queryChanged else {
                 return
             }
 
@@ -575,6 +578,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
             let attributed = makeAttributedText(
                 from: parent.text,
                 imagesByKey: parent.imagesByKey,
+                searchQuery: parent.searchQuery,
                 defaultImageWidth: parent.defaultImageWidth,
                 fontSize: parent.fontSize
             )
@@ -590,6 +594,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
             lastRenderedText = parent.text
             lastImageSignature = signature
             lastRenderedFontSize = parent.fontSize
+            lastRenderedQuery = parent.searchQuery
             publishSelectionIfNeeded()
         }
 
@@ -672,6 +677,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
 private func makeAttributedText(
     from plainText: String,
     imagesByKey: [String: Data],
+    searchQuery: String,
     defaultImageWidth: CGFloat,
     fontSize: CGFloat
 ) -> NSAttributedString {
@@ -728,7 +734,36 @@ private func makeAttributedText(
         output.append(NSAttributedString(string: String(plainText[cursor...]), attributes: baseAttributes))
     }
 
+    if !searchQuery.isEmpty {
+        highlightSearchTerms(in: output, query: searchQuery)
+    }
+
     return output
+}
+
+private func highlightSearchTerms(in attributedString: NSMutableAttributedString, query: String) {
+    let terms = query.split(separator: " ").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
+    guard !terms.isEmpty else { return }
+
+    let string = attributedString.string
+    let text = string.lowercased() as NSString
+    let fullRange = NSRange(location: 0, length: text.length)
+
+    for term in terms {
+        var searchRange = fullRange
+        while searchRange.location < text.length {
+            let foundRange = text.range(of: term, options: [], range: searchRange)
+            if foundRange.location != NSNotFound {
+                attributedString.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.4), range: foundRange)
+                attributedString.addAttribute(.foregroundColor, value: NSColor.black, range: foundRange)
+
+                let newLocation = foundRange.upperBound
+                searchRange = NSRange(location: newLocation, length: fullRange.length - newLocation)
+            } else {
+                break
+            }
+        }
+    }
 }
 
 private func applyEditorTypingAppearance(to textView: NSTextView, fontSize: CGFloat) {

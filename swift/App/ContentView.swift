@@ -861,6 +861,7 @@ private struct EditorSheet: View {
             InlineImageTextEditor(
                 text: $viewModel.editorText,
                 imagesByKey: Dictionary(uniqueKeysWithValues: (viewModel.selectedItem?.images ?? []).map { ($0.imageKey, $0.bytes) }),
+                searchQuery: viewModel.query,
                 defaultImageWidth: 360,
                 fontSize: viewModel.editorFontSize
             ) { cursorIndex in

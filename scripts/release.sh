@@ -34,6 +34,16 @@ STAGING_DIR=$(mktemp -d)
 cp -R "$APP_BUNDLE" "$STAGING_DIR/"
 ln -s /Applications "$STAGING_DIR/Applications"
 
+# Create a fix script for Gatekeeper issues
+cat <<EOF > "$STAGING_DIR/Fix App.command"
+#!/bin/bash
+echo "Fixing AlfredAlternative..."
+xattr -cr /Applications/AlfredAlternative.app
+echo "Done! You can now open the app."
+read -p "Press Enter to close..."
+EOF
+chmod +x "$STAGING_DIR/Fix App.command"
+
 hdiutil create \
     -volname "$APP_NAME" \
     -srcfolder "$STAGING_DIR" \
@@ -66,21 +76,29 @@ if [[ -n "$EXISTING" ]]; then
     sleep 2
 fi
 
-gh release create "$TAG" \
-    "$DMG_PATH" \
-    --repo serkandemirel0420/alfredalt \
-    --title "$APP_NAME $TAG" \
-    --notes "## $APP_NAME $VERSION
+NOTES_FILE=$(mktemp)
+cat <<EOF > "$NOTES_FILE"
+## $APP_NAME $VERSION
 
 Download the DMG, open it, and drag the app to your Applications folder.
 
 **System Requirements:** macOS 13.0+ (Apple Silicon)
 
-> **Note:** This app is not code-signed. If macOS says it's damaged, right-click the app → Open, or run:
-> \`\`\`
-> xattr -cr /Applications/AlfredAlternative.app
-> \`\`\`" \
+> **Note:** This app is not notarized. If you see "Apple could not verify...", do one of the following:
+> 
+> 1. Double-click **Fix App.command** included in the DMG (then right-click open if needed).
+> 2. Or, run: `xattr -cr /Applications/AlfredAlternative.app` in Terminal.
+> 3. Or, Right-click the app -> Open.
+EOF
+
+gh release create "$TAG" \
+    "$DMG_PATH" \
+    --repo serkandemirel0420/alfredalt \
+    --title "$APP_NAME $TAG" \
+    --notes-file "$NOTES_FILE" \
     --latest
+
+rm -f "$NOTES_FILE"
 
 echo ""
 echo "==> Done! Release published at:"
