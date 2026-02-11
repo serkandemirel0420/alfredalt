@@ -21,281 +21,343 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
     ]
 }
 
-// MARK: - Resize drag state
+    // MARK: - Resize drag state
 
-private struct ImageResizeDragState {
-    let attachmentCharIndex: Int
-    let imageKey: String
-    let originalWidth: CGFloat
-    let originalImageData: Data
-    let mouseDownPoint: NSPoint
-}
-
-// MARK: - Resizable NSTextView subclass
-
-private struct ImageMoveDragState {
-    let attachmentCharIndex: Int
-    let imageKey: String
-    let mouseDownPoint: NSPoint
-    var didStartDrag: Bool
-}
-
-private final class ResizableImageTextView: NSTextView {
-    weak var resizeDelegate: ImageResizeDelegate?
-
-    private var dragState: ImageResizeDragState?
-    private var moveDragState: ImageMoveDragState?
-    private var cursorState: CursorOverlay = .none
-    private let moveDragThreshold: CGFloat = 5
-
-    private enum CursorOverlay {
-        case none
-        case resizeHandle
-        case imageBody
+    private struct ImageResizeDragState {
+        let attachmentCharIndex: Int
+        let imageKey: String
+        let originalWidth: CGFloat
+        let originalAspectRatio: CGFloat
+        let originalImageData: Data
+        let mouseDownPoint: NSPoint
+        var currentWidth: CGFloat
+        let initialRectInView: NSRect
     }
 
-    // MARK: Hit-testing helpers
+    // MARK: - Resizable NSTextView subclass
 
-    /// Checks if the point is on any image attachment and returns its char index and key.
-    private func imageAttachmentAt(point: NSPoint) -> (charIndex: Int, imageKey: String)? {
-        guard let layoutManager = layoutManager,
-              let textContainer = textContainer,
-              let storage = textStorage
-        else {
-            return nil
-        }
-
-        let charIndex = layoutManager.characterIndex(
-            for: point,
-            in: textContainer,
-            fractionOfDistanceBetweenInsertionPoints: nil
-        )
-
-        guard charIndex < storage.length else {
-            return nil
-        }
-
-        let attrs = storage.attributes(at: charIndex, effectiveRange: nil)
-        guard let key = attrs[imageKeyAttribute] as? String,
-              attrs[.attachment] is NSTextAttachment
-        else {
-            return nil
-        }
-
-        let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
-        let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-        let rectInView = rect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
-
-        guard rectInView.contains(point) else {
-            return nil
-        }
-
-        return (charIndex, key)
+    private struct ImageMoveDragState {
+        let attachmentCharIndex: Int
+        let imageKey: String
+        let mouseDownPoint: NSPoint
+        var didStartDrag: Bool
     }
 
-    /// Returns the character index and attachment rect for an image attachment at the given point, if
-    /// the point falls within the resize handle zone (bottom-right corner of the image).
-    private func imageResizeHitTest(at point: NSPoint) -> (charIndex: Int, imageKey: String, width: Int, rect: NSRect)? {
-        guard let layoutManager = layoutManager,
-              let textContainer = textContainer,
-              let storage = textStorage
-        else {
-            return nil
+    private final class ResizableImageTextView: NSTextView {
+        weak var resizeDelegate: ImageResizeDelegate?
+
+        private var dragState: ImageResizeDragState?
+        private var moveDragState: ImageMoveDragState?
+        private var cursorState: CursorOverlay = .none
+        private let moveDragThreshold: CGFloat = 5
+
+        private enum CursorOverlay {
+            case none
+            case resizeHandle
+            case imageBody
         }
 
-        let charIndex = layoutManager.characterIndex(
-            for: point,
-            in: textContainer,
-            fractionOfDistanceBetweenInsertionPoints: nil
-        )
+        // MARK: Drawing Override for Resize Overlay
 
-        guard charIndex < storage.length else {
-            return nil
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+
+            if let state = dragState {
+                let currentWidth = state.currentWidth
+                let height = currentWidth / state.originalAspectRatio
+                
+                // Calculate new rect maintaining top-left origin
+                let newRect = NSRect(
+                    origin: state.initialRectInView.origin,
+                    size: NSSize(width: currentWidth, height: height)
+                )
+
+                // Draw resize border (hollow square)
+                let path = NSBezierPath(rect: newRect)
+                path.lineWidth = 1.5
+                
+                // Use a high-contrast color depending on appearance
+                let overlayColor = NSColor.controlAccentColor
+                overlayColor.setStroke()
+                
+                // Dash pattern for visibility
+                let dashPattern: [CGFloat] = [6.0, 4.0]
+                path.setLineDash(dashPattern, count: 2, phase: 0.0)
+                path.stroke()
+
+                // Draw resize handle at bottom-right of the new rect
+                let handleSize: CGFloat = 10
+                let handleRect = NSRect(
+                    x: newRect.maxX - handleSize,
+                    y: newRect.maxY - handleSize,
+                    width: handleSize,
+                    height: handleSize
+                )
+                
+                let handlePath = NSBezierPath(rect: handleRect)
+                overlayColor.setFill()
+                handlePath.fill()
+            }
         }
 
-        let attrs = storage.attributes(at: charIndex, effectiveRange: nil)
-        guard let key = attrs[imageKeyAttribute] as? String,
-              attrs[.attachment] is NSTextAttachment
-        else {
-            return nil
-        }
+        // MARK: Hit-testing helpers
 
-        // Use stored width if available, otherwise fall back to the rendered attachment width
-        let width: Int
-        if let stored = attrs[imageWidthAttribute] as? Int {
-            width = stored
-        } else {
+        /// Checks if the point is on any image attachment and returns its char index and key.
+        private func imageAttachmentAt(point: NSPoint) -> (charIndex: Int, imageKey: String)? {
+            guard let layoutManager = layoutManager,
+                  let textContainer = textContainer,
+                  let storage = textStorage
+            else {
+                return nil
+            }
+
+            let charIndex = layoutManager.characterIndex(
+                for: point,
+                in: textContainer,
+                fractionOfDistanceBetweenInsertionPoints: nil
+            )
+
+            guard charIndex < storage.length else {
+                return nil
+            }
+
+            let attrs = storage.attributes(at: charIndex, effectiveRange: nil)
+            guard let key = attrs[imageKeyAttribute] as? String,
+                  attrs[.attachment] is NSTextAttachment
+            else {
+                return nil
+            }
+
             let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
             let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-            width = Int(rect.width.rounded())
-        }
+            let rectInView = rect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
 
-        let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
-        let attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-        let rectInView = attachmentRect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
-
-        // Check if point is inside the attachment rect
-        guard rectInView.contains(point) else {
-            return nil
-        }
-
-        // Check if point is within the bottom-right corner resize handle
-        let handleZone = NSRect(
-            x: rectInView.maxX - resizeHandleSize,
-            y: rectInView.maxY - resizeHandleSize,
-            width: resizeHandleSize,
-            height: resizeHandleSize
-        )
-
-        guard handleZone.contains(point) else {
-            return nil
-        }
-
-        return (charIndex, key, width, rectInView)
-    }
-
-    // MARK: Mouse events
-
-    override func mouseMoved(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-
-        if imageResizeHitTest(at: point) != nil {
-            if cursorState != .resizeHandle {
-                if cursorState != .none { NSCursor.pop() }
-                cursorState = .resizeHandle
-                NSCursor.crosshair.push()
+            guard rectInView.contains(point) else {
+                return nil
             }
-        } else if imageAttachmentAt(point: point) != nil {
-            if cursorState != .imageBody {
-                if cursorState != .none { NSCursor.pop() }
-                cursorState = .imageBody
-                NSCursor.openHand.push()
-            }
-        } else {
-            if cursorState != .none {
-                NSCursor.pop()
-                cursorState = .none
-            }
+
+            return (charIndex, key)
         }
 
-        super.mouseMoved(with: event)
-    }
+        /// Returns the character index and attachment rect for an image attachment at the given point, if
+        /// the point falls within the resize handle zone (bottom-right corner of the image).
+        private func imageResizeHitTest(at point: NSPoint) -> (charIndex: Int, imageKey: String, width: Int, rect: NSRect)? {
+            guard let layoutManager = layoutManager,
+                  let textContainer = textContainer,
+                  let storage = textStorage
+            else {
+                return nil
+            }
 
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-
-        // Priority 1: Resize handle click
-        if let hit = imageResizeHitTest(at: point),
-           let imageData = resizeDelegate?.originalImageData(forKey: hit.imageKey) {
-            dragState = ImageResizeDragState(
-                attachmentCharIndex: hit.charIndex,
-                imageKey: hit.imageKey,
-                originalWidth: CGFloat(hit.width),
-                originalImageData: imageData,
-                mouseDownPoint: point
+            let charIndex = layoutManager.characterIndex(
+                for: point,
+                in: textContainer,
+                fractionOfDistanceBetweenInsertionPoints: nil
             )
-            return
-        }
 
-        // Priority 2: Image body click → start potential move
-        if let hit = imageAttachmentAt(point: point) {
-            moveDragState = ImageMoveDragState(
-                attachmentCharIndex: hit.charIndex,
-                imageKey: hit.imageKey,
-                mouseDownPoint: point,
-                didStartDrag: false
+            guard charIndex < storage.length else {
+                return nil
+            }
+
+            let attrs = storage.attributes(at: charIndex, effectiveRange: nil)
+            guard let key = attrs[imageKeyAttribute] as? String,
+                  attrs[.attachment] is NSTextAttachment
+            else {
+                return nil
+            }
+
+            // Use stored width if available, otherwise fall back to rendered width
+            let width: Int
+            if let stored = attrs[imageWidthAttribute] as? Int {
+                width = stored
+            } else {
+                let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
+                let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+                width = Int(rect.width.rounded())
+            }
+
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: charIndex, length: 1), actualCharacterRange: nil)
+            let attachmentRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            let rectInView = attachmentRect.offsetBy(dx: textContainerOrigin.x, dy: textContainerOrigin.y)
+
+            // Check if point is inside the attachment rect
+            guard rectInView.contains(point) else {
+                return nil
+            }
+
+            // Check if point is within the bottom-right corner resize handle
+            let handleZone = NSRect(
+                x: rectInView.maxX - resizeHandleSize,
+                y: rectInView.maxY - resizeHandleSize,
+                width: resizeHandleSize,
+                height: resizeHandleSize
             )
-            // Select the attachment so it's visually highlighted
-            setSelectedRange(NSRange(location: hit.charIndex, length: 1))
-            return
+
+            guard handleZone.contains(point) else {
+                return nil
+            }
+
+            return (charIndex, key, width, rectInView)
         }
 
-        super.mouseDown(with: event)
-    }
+        // MARK: Mouse events
 
-    override func mouseDragged(with event: NSEvent) {
-        // Resize drag
-        if let state = dragState {
+        override func mouseMoved(with event: NSEvent) {
             let point = convert(event.locationInWindow, from: nil)
-            let deltaX = point.x - state.mouseDownPoint.x
-            let deltaY = point.y - state.mouseDownPoint.y
-            let diagonalDelta = (deltaX + deltaY) / 2.0
-            let newWidth = min(max(state.originalWidth + diagonalDelta, minImageWidth), maxImageWidth)
-            updateImageAttachment(state: state, newWidth: newWidth)
-            return
-        }
 
-        // Move drag
-        if moveDragState != nil {
-            let point = convert(event.locationInWindow, from: nil)
-            let distance = hypot(point.x - moveDragState!.mouseDownPoint.x, point.y - moveDragState!.mouseDownPoint.y)
-
-            if distance > moveDragThreshold {
-                if !moveDragState!.didStartDrag {
-                    moveDragState!.didStartDrag = true
-                    NSCursor.closedHand.push()
+            if imageResizeHitTest(at: point) != nil {
+                if cursorState != .resizeHandle {
+                    if cursorState != .none { NSCursor.pop() }
+                    cursorState = .resizeHandle
+                    NSCursor.crosshair.push() // Or resizeLeftRight if preferred
                 }
-
-                // Show insertion point at current mouse position
-                guard let layoutManager = layoutManager, let textContainer = textContainer else { return }
-                let adjustedPoint = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
-                let insertIndex = layoutManager.characterIndex(
-                    for: adjustedPoint,
-                    in: textContainer,
-                    fractionOfDistanceBetweenInsertionPoints: nil
-                )
-                let safeIndex = max(0, min(insertIndex, (textStorage?.length ?? 0)))
-                setSelectedRange(NSRange(location: safeIndex, length: 0))
+            } else if imageAttachmentAt(point: point) != nil {
+                if cursorState != .imageBody {
+                    if cursorState != .none { NSCursor.pop() }
+                    cursorState = .imageBody
+                    NSCursor.openHand.push()
+                }
+            } else {
+                if cursorState != .none {
+                    NSCursor.pop()
+                    cursorState = .none
+                }
             }
-            return
+
+            super.mouseMoved(with: event)
         }
 
-        super.mouseDragged(with: event)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        // Resize complete
-        if let state = dragState {
+        override func mouseDown(with event: NSEvent) {
             let point = convert(event.locationInWindow, from: nil)
-            let deltaX = point.x - state.mouseDownPoint.x
-            let deltaY = point.y - state.mouseDownPoint.y
-            let diagonalDelta = (deltaX + deltaY) / 2.0
-            let newWidth = min(max(state.originalWidth + diagonalDelta, minImageWidth), maxImageWidth)
 
-            dragState = nil
-            updateImageAttachment(state: state, newWidth: newWidth)
-            resizeDelegate?.imageDidResize()
-            return
+            // Priority 1: Resize handle click
+            if let hit = imageResizeHitTest(at: point),
+               let imageData = resizeDelegate?.originalImageData(forKey: hit.imageKey) {
+                
+                let originalWidth = CGFloat(hit.width)
+                // Calculate aspect ratio from current rect
+                let ratio = hit.rect.width / max(1, hit.rect.height)
+                
+                dragState = ImageResizeDragState(
+                    attachmentCharIndex: hit.charIndex,
+                    imageKey: hit.imageKey,
+                    originalWidth: originalWidth,
+                    originalAspectRatio: ratio,
+                    originalImageData: imageData,
+                    mouseDownPoint: point,
+                    currentWidth: originalWidth,
+                    initialRectInView: hit.rect
+                )
+                
+                // Show resize cursor
+                NSCursor.closedHand.push()
+                // Trigger redraw to show overlay
+                self.needsDisplay = true
+                return
+            }
+
+            // Priority 2: Image body click → start potential move
+            if let hit = imageAttachmentAt(point: point) {
+                moveDragState = ImageMoveDragState(
+                    attachmentCharIndex: hit.charIndex,
+                    imageKey: hit.imageKey,
+                    mouseDownPoint: point,
+                    didStartDrag: false
+                )
+                // Select the attachment so it's visually highlighted
+                setSelectedRange(NSRange(location: hit.charIndex, length: 1))
+                return
+            }
+
+            super.mouseDown(with: event)
         }
 
-        // Move complete
-        if let moveState = moveDragState {
-            moveDragState = nil
-
-            if moveState.didStartDrag {
-                NSCursor.pop()
-
+        override func mouseDragged(with event: NSEvent) {
+            // Resize drag
+            if var state = dragState {
                 let point = convert(event.locationInWindow, from: nil)
-                guard let layoutManager = layoutManager, let textContainer = textContainer else { return }
-                let adjustedPoint = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
-                let dropIndex = layoutManager.characterIndex(
-                    for: adjustedPoint,
-                    in: textContainer,
-                    fractionOfDistanceBetweenInsertionPoints: nil
-                )
-                let safeDropIndex = max(0, min(dropIndex, (textStorage?.length ?? 0)))
-
-                // Only move if dropped at a different position
-                if safeDropIndex != moveState.attachmentCharIndex && safeDropIndex != moveState.attachmentCharIndex + 1 {
-                    moveImageAttachment(from: moveState.attachmentCharIndex, to: safeDropIndex)
-                    resizeDelegate?.imageDidResize()
-                }
+                let deltaX = point.x - state.mouseDownPoint.x
+                let deltaY = point.y - state.mouseDownPoint.y
+                let diagonalDelta = (deltaX + deltaY) / 2.0
+                
+                let newWidth = min(max(state.originalWidth + diagonalDelta, minImageWidth), maxImageWidth)
+                state.currentWidth = newWidth
+                dragState = state
+                
+                // Invalidate display to update overlay
+                self.needsDisplay = true
+                return
             }
-            return
+
+            // Move drag
+            if moveDragState != nil {
+                let point = convert(event.locationInWindow, from: nil)
+                let distance = hypot(point.x - moveDragState!.mouseDownPoint.x, point.y - moveDragState!.mouseDownPoint.y)
+
+                if distance > moveDragThreshold {
+                    if !moveDragState!.didStartDrag {
+                        moveDragState!.didStartDrag = true
+                        NSCursor.closedHand.push()
+                    }
+
+                    // Show insertion point at current mouse position
+                    guard let layoutManager = layoutManager, let textContainer = textContainer else { return }
+                    let adjustedPoint = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+                    let insertIndex = layoutManager.characterIndex(
+                        for: adjustedPoint,
+                        in: textContainer,
+                        fractionOfDistanceBetweenInsertionPoints: nil
+                    )
+                    let safeIndex = max(0, min(insertIndex, (textStorage?.length ?? 0)))
+                    setSelectedRange(NSRange(location: safeIndex, length: 0))
+                }
+                return
+            }
+
+            super.mouseDragged(with: event)
         }
 
-        super.mouseUp(with: event)
-    }
+        override func mouseUp(with event: NSEvent) {
+            // Resize complete
+            if let state = dragState {
+                // Apply final resize
+                updateImageAttachment(state: state, newWidth: state.currentWidth)
+                
+                dragState = nil
+                NSCursor.pop() // Pop the closedHand cursor pushed in mouseDown
+                self.needsDisplay = true // Remove overlay
+                resizeDelegate?.imageDidResize()
+                return
+            }
+
+            // Move complete
+            if let moveState = moveDragState {
+                moveDragState = nil
+
+                if moveState.didStartDrag {
+                    NSCursor.pop()
+
+                    let point = convert(event.locationInWindow, from: nil)
+                    guard let layoutManager = layoutManager, let textContainer = textContainer else { return }
+                    let adjustedPoint = NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y)
+                    let dropIndex = layoutManager.characterIndex(
+                        for: adjustedPoint,
+                        in: textContainer,
+                        fractionOfDistanceBetweenInsertionPoints: nil
+                    )
+                    let safeDropIndex = max(0, min(dropIndex, (textStorage?.length ?? 0)))
+
+                    // Only move if dropped at a different position
+                    if safeDropIndex != moveState.attachmentCharIndex && safeDropIndex != moveState.attachmentCharIndex + 1 {
+                        moveImageAttachment(from: moveState.attachmentCharIndex, to: safeDropIndex)
+                        resizeDelegate?.imageDidResize()
+                    }
+                }
+                return
+            }
+
+            super.mouseUp(with: event)
+        }
 
     override func mouseExited(with event: NSEvent) {
         if cursorState != .none {
