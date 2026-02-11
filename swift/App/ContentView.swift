@@ -579,6 +579,7 @@ private struct WindowDragHandle: NSViewRepresentable {
 
 private struct SettingsSheet: View {
     @ObservedObject var viewModel: LauncherViewModel
+    @EnvironmentObject private var updateChecker: UpdateChecker
     @Environment(\.dismiss) private var dismiss
     @FocusState private var pathFieldFocused: Bool
 
@@ -631,6 +632,56 @@ private struct SettingsSheet: View {
                 }
                 .keyboardShortcut(.cancelAction)
             }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Version")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(updateChecker.currentVersion)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                if updateChecker.updateAvailable, let latest = updateChecker.latestVersion {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .foregroundStyle(Color(nsColor: .systemBlue))
+                        Text("Update available: v\(latest)")
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        if let url = updateChecker.downloadURL {
+                            Button("Download") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .background(Color(nsColor: .systemBlue).opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                } else {
+                    HStack(spacing: 8) {
+                        if updateChecker.isChecking {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Checking for updates...")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Up to date")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Check for Updates") {
+                                updateChecker.checkForUpdate()
+                            }
+                        }
+                    }
+                }
+            }
         }
         .padding(18)
         .frame(minWidth: 720)
@@ -644,6 +695,7 @@ private struct SettingsSheet: View {
             }
         }
     }
+
 
     private func openStorageFolder() {
         let path = viewModel.settingsStorageDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)

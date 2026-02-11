@@ -40,13 +40,16 @@ final class AlfredAlternativeAppDelegate: NSObject, NSApplicationDelegate {
 struct AlfredAlternativeApp: App {
     @NSApplicationDelegateAdaptor(AlfredAlternativeAppDelegate.self) private var appDelegate
     @StateObject private var viewModel = LauncherViewModel()
+    @StateObject private var updateChecker = UpdateChecker()
 
     var body: some Scene {
         Window("Launcher", id: "launcher") {
             ContentView()
                 .environmentObject(viewModel)
+                .environmentObject(updateChecker)
                 .onAppear {
                     appDelegate.viewModel = viewModel
+                    updateChecker.checkOncePerSession()
                 }
         }
         .commands {
@@ -63,6 +66,7 @@ struct AlfredAlternativeApp: App {
         Window("Editor", id: "editor") {
             EditorWindowView()
                 .environmentObject(viewModel)
+                .environmentObject(updateChecker)
         }
         .windowStyle(.automatic)
         .defaultSize(width: 980, height: 720)

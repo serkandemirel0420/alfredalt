@@ -5,7 +5,7 @@ APP_BUNDLE := .build/$(APP_NAME).app
 APP_BINARY := $(APP_BUNDLE)/Contents/MacOS/$(APP_NAME)
 INFO_PLIST := $(APP_BUNDLE)/Contents/Info.plist
 
-.PHONY: bridge build-app run run-cli
+.PHONY: bridge build-app run run-cli release
 
 bridge:
 	./scripts/generate_swift_bridge.sh
@@ -38,8 +38,11 @@ build-app: bridge
 		'	<string>13.0</string>' \
 		'	<key>NSHighResolutionCapable</key>' \
 		'	<true/>' \
+		'	<key>CFBundleIconFile</key>' \
+		'	<string>AppIcon</string>' \
 		'</dict>' \
 		'</plist>' > $(INFO_PLIST)
+	@cp resources/AppIcon.icns $(APP_BUNDLE)/Contents/Resources/AppIcon.icns
 	@LIB_PATH=$$(if [[ -f swift/RustBridge/lib/libalfred_alt_universal.a ]]; then echo swift/RustBridge/lib/libalfred_alt_universal.a; else echo swift/RustBridge/lib/libalfred_alt_host.a; fi); \
 	if [[ ! -f "$$LIB_PATH" ]]; then \
 		echo "error: Rust static library not found. Expected $$LIB_PATH"; \
@@ -52,6 +55,7 @@ build-app: bridge
 		-Xcc -fmodule-map-file=swift/RustBridge/Generated/alfred_alt.modulemap \
 		"$$LIB_PATH" \
 		-o $(APP_BINARY)
+	@codesign --force --deep --sign - $(APP_BUNDLE)
 
 run:
 	$(MAKE) build-app
@@ -59,3 +63,6 @@ run:
 
 run-cli: build-app
 	$(APP_BINARY)
+
+release:
+	./scripts/release.sh
