@@ -51,6 +51,7 @@ private enum ItemAction: Int, CaseIterable {
 
 struct ContentView: View {
     @EnvironmentObject private var viewModel: LauncherViewModel
+    @EnvironmentObject private var themeManager: ThemeManager
     @Environment(\.openWindow) private var openWindow
     @FocusState private var searchFieldFocused: Bool
     @State private var selectedIndex = 0
@@ -73,20 +74,18 @@ struct ContentView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            launcherShell(width: launcherWindowWidth)
-                .background(
-                    GeometryReader { proxy in
-                        Color.clear.preference(
-                            key: LauncherShellHeightPreferenceKey.self,
-                            value: ceil(proxy.size.height)
-                        )
-                    }
-                )
-        }
-        .frame(width: launcherWindowWidth)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(Color.clear)
+        launcherShell(width: launcherWindowWidth)
+            .background(
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: LauncherShellHeightPreferenceKey.self,
+                        value: ceil(proxy.size.height)
+                    )
+                }
+            )
+            .frame(width: launcherWindowWidth)
+            .frame(maxHeight: .infinity, alignment: .top)
+            .background(Color.clear)
         .background(
             WindowConfigurator(
                 desiredSize: NSSize(width: launcherWindowWidth, height: measuredShellHeight)
@@ -144,122 +143,114 @@ struct ContentView: View {
         }
         .sheet(isPresented: $viewModel.isSettingsPresented) {
             SettingsSheet(viewModel: viewModel)
+                .environmentObject(themeManager)
+        }
+    }
+    
+    private var searchFieldBinding: Binding<String> {
+        Binding(
+            get: { actionMenuTarget != nil ? actionMenuFilter : viewModel.query },
+            set: { newValue in
+                if actionMenuTarget != nil {
+                    actionMenuFilter = newValue
+                } else {
+                    viewModel.query = newValue
+                }
+            }
+        )
+    }
+    
+    private var searchFieldPlaceholder: String {
+        actionMenuTarget != nil ? "Filter actions..." : "Type to search..."
+    }
+    
+    private func searchFieldView() -> some View {
+        let colors = themeManager.colors
+        return HStack {
+            TextField(searchFieldPlaceholder, text: searchFieldBinding)
+                .textFieldStyle(.plain)
+                .font(.system(size: 30, weight: .regular))
+                .foregroundStyle(colors.itemTitleText)
+                .focused($searchFieldFocused)
+                .onSubmit(handleSearchSubmit)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(colors.searchFieldBackground)
+        .overlay(
+            RoundedRectangle(cornerRadius: launcherSearchFieldCornerRadius, style: .continuous)
+                .stroke(colors.searchFieldBorder, lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: launcherSearchFieldCornerRadius, style: .continuous))
+    }
+    
+    private func handleSearchSubmit() {
+        if let target = actionMenuTarget {
+            let actions = filteredActions
+            if actions.indices.contains(actionMenuSelectedIndex) {
+                executeAction(actions[actionMenuSelectedIndex], on: target)
+            }
+        } else {
+            activateCurrentSelection()
+        }
+    }
+    
+    @ViewBuilder
+    private func resultsContentView(showResults: Bool) -> some View {
+        if let target = actionMenuTarget {
+            actionMenuView(for: target)
+        } else if showResults {
+            ResultsListView(
+                results: viewModel.results,
+                selectedIndex: $selectedIndex,
+                resultsScrollProxy: $resultsScrollProxy,
+                onActivate: { idx in
+                    activateResult(at: idx)
+                },
+                onScrollProxySet: { proxy in
+                    resultsScrollProxy = proxy
+                },
+                onScrollSelection: { proxy, animated in
+                    scrollSelectionIntoView(using: proxy, animated: animated)
+                }
+            )
         }
     }
 
     private func launcherShell(width: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                TextField(
-                    actionMenuTarget != nil ? "Filter actions..." : "Type to search...",
-                    text: Binding(
-                        get: { actionMenuTarget != nil ? actionMenuFilter : viewModel.query },
-                        set: { newValue in
-                            if actionMenuTarget != nil {
-                                actionMenuFilter = newValue
-                            } else {
-                                viewModel.query = newValue
-                            }
-                        }
-                    )
-                )
-                .textFieldStyle(.plain)
-                .font(.system(size: 30, weight: .regular))
-                .focused($searchFieldFocused)
-                .onSubmit {
-                    if let target = actionMenuTarget {
-                        let actions = filteredActions
-                        if actions.indices.contains(actionMenuSelectedIndex) {
-                            executeAction(actions[actionMenuSelectedIndex], on: target)
-                        }
-                    } else {
-                        activateCurrentSelection()
-                    }
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255, opacity: 252 / 255))
-            .overlay(
-                RoundedRectangle(cornerRadius: launcherSearchFieldCornerRadius, style: .continuous)
-                    .stroke(Color.black.opacity(0.12), lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: launcherSearchFieldCornerRadius, style: .continuous))
-
+        let colors = themeManager.colors
+        let trimmedQuery = viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let showResults = !trimmedQuery.isEmpty
+        let hasContent = showResults || actionMenuTarget != nil
+        
+        return VStack(alignment: .leading, spacing: 0) {
+            searchFieldView()
+            
             if let errorMessage = viewModel.errorMessage {
                 Text("Error: \(errorMessage)")
-                    .foregroundStyle(.red)
+                    .foregroundStyle(colors.errorColor)
                     .font(.system(size: 13))
                     .padding(.top, 6)
             }
-
-            let trimmedQuery = viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines)
-            let showResults = !trimmedQuery.isEmpty
-            Group {
-                if let target = actionMenuTarget {
-                    actionMenuView(for: target)
-                } else if showResults {
-                    if viewModel.results.isEmpty {
-                        Text("No matching results. Press Enter to add this as a new entry.")
-                            .font(.system(size: 13))
-                            .italic()
-                            .foregroundStyle(Color(white: 95 / 255))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    } else {
-                        ScrollViewReader { proxy in
-                            ScrollView {
-                                LazyVStack(spacing: 0) {
-                                    ForEach(Array(viewModel.results.enumerated()), id: \.element.id) { idx, item in
-                                        let isSelected = idx == selectedIndex
-                                        ResultRow(
-                                            item: item,
-                                            isSelected: isSelected,
-                                            onActivate: {
-                                                selectedIndex = idx
-                                                activateResult(at: idx)
-                                            }
-                                        )
-                                        .equatable()
-                                        .id(item.id)
-
-                                        if idx + 1 < viewModel.results.count {
-                                            Divider()
-                                        }
-                                    }
-                                }
-                            }
-                            .onAppear {
-                                resultsScrollProxy = proxy
-                                if selectedIndex > 0 {
-                                    scrollSelectionIntoView(using: proxy, animated: false)
-                                }
-                            }
-                            .onDisappear {
-                                if resultsScrollProxy != nil {
-                                    resultsScrollProxy = nil
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.top, showResults || actionMenuTarget != nil ? 8 : 0)
-            .frame(
-                maxWidth: .infinity,
-                minHeight: showResults || actionMenuTarget != nil ? resultsViewportHeight : 0,
-                maxHeight: showResults || actionMenuTarget != nil ? resultsViewportHeight : 0,
-                alignment: .top
-            )
-            .clipped()
-            .clipShape(RoundedRectangle(cornerRadius: launcherResultsCornerRadius, style: .continuous))
+            
+            resultsContentView(showResults: showResults)
+                .padding(.top, hasContent ? 8 : 0)
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: hasContent ? resultsViewportHeight : 0,
+                    maxHeight: hasContent ? resultsViewportHeight : 0,
+                    alignment: .top
+                )
+                .clipped()
+                .clipShape(RoundedRectangle(cornerRadius: launcherResultsCornerRadius, style: .continuous))
         }
         .padding(launcherShellPadding)
         .frame(width: width)
-        .background(Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255))
+        .background(colors.launcherBackground)
         .overlay(WindowDragHandle(inset: launcherShellPadding))
         .overlay(
             RoundedRectangle(cornerRadius: launcherShellCornerRadius, style: .continuous)
-                .stroke(Color.black.opacity(35 / 255), lineWidth: 1)
+                .stroke(colors.launcherBorder, lineWidth: 1)
         )
         .clipShape(RoundedRectangle(cornerRadius: launcherShellCornerRadius, style: .continuous))
     }
@@ -325,19 +316,19 @@ struct ContentView: View {
             HStack(spacing: 6) {
                 Image(systemName: "ellipsis.circle.fill")
                     .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(Color(white: 100 / 255))
+                    .foregroundStyle(themeManager.colors.itemSubtitleText)
                 Text(target.title)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(Color(white: 50 / 255))
+                    .foregroundStyle(themeManager.colors.actionMenuHeaderText)
                     .lineLimit(1)
                 Spacer()
                 Text("⌘ to go back")
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(white: 140 / 255))
+                    .foregroundStyle(themeManager.colors.placeholderText)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Color(white: 240 / 255))
+            .background(themeManager.colors.actionMenuHeaderBackground)
 
             Divider()
 
@@ -346,7 +337,7 @@ struct ContentView: View {
                 Text("No matching actions")
                     .font(.system(size: 13))
                     .italic()
-                    .foregroundStyle(Color(white: 95 / 255))
+                    .foregroundStyle(themeManager.colors.placeholderText)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
             } else {
@@ -359,16 +350,16 @@ struct ContentView: View {
                             Image(systemName: action.systemImage)
                                 .font(.system(size: 15))
                                 .frame(width: 22)
-                                .foregroundStyle(action.isDestructive ? Color.red : Color(white: 60 / 255))
+                                .foregroundStyle(action.isDestructive ? themeManager.colors.destructiveAction : themeManager.colors.itemSubtitleText)
                             Text(action.label)
                                 .font(.system(size: 16, weight: .medium))
-                                .foregroundStyle(action.isDestructive ? Color.red : Color(white: 30 / 255))
+                                .foregroundStyle(action.isDestructive ? themeManager.colors.destructiveAction : themeManager.colors.itemTitleText)
                             Spacer()
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(isSelected ? Color(red: 230 / 255, green: 236 / 255, blue: 245 / 255) : Color.clear)
+                        .background(isSelected ? themeManager.colors.selectedItemBackground : themeManager.colors.itemBackground)
                     }
                     .buttonStyle(.plain)
 
@@ -470,6 +461,7 @@ struct ContentView: View {
 
 struct EditorWindowView: View {
     @EnvironmentObject private var viewModel: LauncherViewModel
+    @EnvironmentObject private var themeManager: ThemeManager
 
     var body: some View {
         Group {
@@ -486,7 +478,7 @@ struct EditorWindowView: View {
                 EditorSheet(viewModel: viewModel)
             }
         }
-        .background(Color(nsColor: NSColor.windowBackgroundColor))
+        .background(themeManager.colors.editorBackground)
         .background(
             WindowAccessor { window in
                 viewModel.registerEditorWindow(window)
@@ -500,6 +492,7 @@ struct EditorWindowView: View {
         }
         .sheet(isPresented: $viewModel.isSettingsPresented) {
             SettingsSheet(viewModel: viewModel)
+                .environmentObject(themeManager)
         }
     }
 }
@@ -580,14 +573,82 @@ private struct WindowDragHandle: NSViewRepresentable {
 private struct SettingsSheet: View {
     @ObservedObject var viewModel: LauncherViewModel
     @EnvironmentObject private var updateChecker: UpdateChecker
+    @EnvironmentObject private var themeManager: ThemeManager
     @Environment(\.dismiss) private var dismiss
     @FocusState private var pathFieldFocused: Bool
+    @State private var selectedTab: SettingsTab = .general
+    
+    enum SettingsTab: String, CaseIterable, Identifiable {
+        case general = "General"
+        case appearance = "Appearance"
+        
+        var id: String { rawValue }
+        
+        var icon: String {
+            switch self {
+            case .general: return "gear"
+            case .appearance: return "paintbrush"
+            }
+        }
+    }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                Text("Settings")
+                    .font(.system(size: 20, weight: .semibold))
+                Spacer()
+                Button("Close") {
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding([.horizontal, .top], 18)
+            .padding(.bottom, 12)
+            
+            // Tab picker
+            HStack(spacing: 0) {
+                ForEach(SettingsTab.allCases) { tab in
+                    TabButton(
+                        tab: tab,
+                        isSelected: selectedTab == tab,
+                        action: { selectedTab = tab }
+                    )
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .padding(.bottom, 12)
+            
+            Divider()
+            
+            // Tab content
+            Group {
+                switch selectedTab {
+                case .general:
+                    generalTab
+                case .appearance:
+                    appearanceTab
+                }
+            }
+            .padding(18)
+        }
+        .frame(minWidth: 800, minHeight: 550)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            viewModel.loadSettingsStorageDirectoryPath()
+            pathFieldFocused = true
+        }
+        .onChange(of: viewModel.settingsStorageDirectoryPath) { _, _ in
+            if viewModel.settingsSuccessMessage != nil {
+                viewModel.settingsSuccessMessage = nil
+            }
+        }
+    }
+    
+    private var generalTab: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Settings")
-                .font(.system(size: 20, weight: .semibold))
-
             VStack(alignment: .leading, spacing: 8) {
                 Text("JSON Storage Folder")
                     .font(.system(size: 12, weight: .medium))
@@ -602,13 +663,13 @@ private struct SettingsSheet: View {
             if let settingsErrorMessage = viewModel.settingsErrorMessage {
                 Text(settingsErrorMessage)
                     .font(.system(size: 12))
-                    .foregroundStyle(.red)
+                    .foregroundStyle(themeManager.colors.errorColor)
             }
 
             if let settingsSuccessMessage = viewModel.settingsSuccessMessage {
                 Text(settingsSuccessMessage)
                     .font(.system(size: 12))
-                    .foregroundStyle(Color(nsColor: .systemGreen))
+                    .foregroundStyle(themeManager.colors.successColor)
             }
 
             HStack {
@@ -626,11 +687,6 @@ private struct SettingsSheet: View {
                     _ = viewModel.saveSettingsStorageDirectoryPath()
                 }
                 .keyboardShortcut("s", modifiers: .command)
-
-                Button("Close") {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
             }
 
             Divider()
@@ -649,7 +705,7 @@ private struct SettingsSheet: View {
                 if updateChecker.updateAvailable, let latest = updateChecker.latestVersion {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.up.circle.fill")
-                            .foregroundStyle(Color(nsColor: .systemBlue))
+                            .foregroundStyle(themeManager.colors.accentColor)
                         Text("Update available: v\(latest)")
                             .font(.system(size: 13, weight: .medium))
                         Spacer()
@@ -660,7 +716,7 @@ private struct SettingsSheet: View {
                         }
                     }
                     .padding(10)
-                    .background(Color(nsColor: .systemBlue).opacity(0.08))
+                    .background(themeManager.colors.accentColor.opacity(0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 } else {
                     HStack(spacing: 8) {
@@ -682,17 +738,181 @@ private struct SettingsSheet: View {
                     }
                 }
             }
+            
+            Spacer()
         }
-        .padding(18)
-        .frame(minWidth: 720)
-        .onAppear {
-            viewModel.loadSettingsStorageDirectoryPath()
-            pathFieldFocused = true
-        }
-        .onChange(of: viewModel.settingsStorageDirectoryPath) { _, _ in
-            if viewModel.settingsSuccessMessage != nil {
-                viewModel.settingsSuccessMessage = nil
+    }
+    
+    private var appearanceTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Theme")
+                    .font(.system(size: 14, weight: .medium))
+                
+                Text("Choose a color theme for the app. The theme will be applied immediately.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                
+                LazyVGrid(columns: [
+                    GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 16)
+                ], spacing: 16) {
+                    ForEach(AppTheme.allThemes) { theme in
+                        ThemeCard(
+                            theme: theme,
+                            isSelected: themeManager.currentTheme.id == theme.id
+                        ) {
+                            themeManager.setTheme(theme)
+                        }
+                    }
+                }
+                
+                // Show color pickers for custom theme
+                if themeManager.currentTheme.isCustom {
+                    Divider()
+                        .padding(.vertical, 8)
+                    
+                    customColorsSection
+                }
+                
+                Spacer(minLength: 20)
             }
+            .padding(.bottom, 10)
+        }
+    }
+    
+    private var customColorsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Custom Colors")
+                .font(.system(size: 14, weight: .medium))
+            
+            Text("Customize the colors for your theme.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            
+            VStack(spacing: 12) {
+                ColorPickerRow(
+                    label: "Outer Background",
+                    color: Binding(
+                        get: { themeManager.customColors.launcherBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.launcherBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Search Bar Background",
+                    color: Binding(
+                        get: { themeManager.customColors.searchFieldBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.searchFieldBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Search Bar Border",
+                    color: Binding(
+                        get: { themeManager.customColors.searchFieldBorder },
+                        set: { themeManager.updateCustomColor($0, for: \.searchFieldBorder) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Outer Border",
+                    color: Binding(
+                        get: { themeManager.customColors.launcherBorder },
+                        set: { themeManager.updateCustomColor($0, for: \.launcherBorder) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Item Background",
+                    color: Binding(
+                        get: { themeManager.customColors.itemBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.itemBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Item Title",
+                    color: Binding(
+                        get: { themeManager.customColors.itemTitleText },
+                        set: { themeManager.updateCustomColor($0, for: \.itemTitleText) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Item Subtitle",
+                    color: Binding(
+                        get: { themeManager.customColors.itemSubtitleText },
+                        set: { themeManager.updateCustomColor($0, for: \.itemSubtitleText) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Selected Item Background",
+                    color: Binding(
+                        get: { themeManager.customColors.selectedItemBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.selectedItemBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Selected Item Title",
+                    color: Binding(
+                        get: { themeManager.customColors.selectedItemTitleText },
+                        set: { themeManager.updateCustomColor($0, for: \.selectedItemTitleText) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Selected Item Subtitle",
+                    color: Binding(
+                        get: { themeManager.customColors.selectedItemSubtitleText },
+                        set: { themeManager.updateCustomColor($0, for: \.selectedItemSubtitleText) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Accent Color",
+                    color: Binding(
+                        get: { themeManager.customColors.accentColor },
+                        set: { themeManager.updateCustomColor($0, for: \.accentColor) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Editor Background",
+                    color: Binding(
+                        get: { themeManager.customColors.editorBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.editorBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Editor Text Area",
+                    color: Binding(
+                        get: { themeManager.customColors.editorTextBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.editorTextBackground) }
+                    )
+                )
+                
+
+                
+                ColorPickerRow(
+                    label: "Highlight Background",
+                    color: Binding(
+                        get: { themeManager.customColors.highlightBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.highlightBackground) }
+                    )
+                )
+            }
+            
+            HStack {
+                Spacer()
+                Button("Reset to Defaults") {
+                    themeManager.customColors = AppTheme.defaultCustomColors
+                }
+                .font(.system(size: 12))
+            }
+            .padding(.top, 8)
         }
     }
 
@@ -747,6 +967,7 @@ private struct ResultRow: View, Equatable {
     let item: SearchResultRecord
     let isSelected: Bool
     let onActivate: () -> Void
+    @EnvironmentObject var themeManager: ThemeManager
 
     static func == (lhs: ResultRow, rhs: ResultRow) -> Bool {
         lhs.item.id == rhs.item.id &&
@@ -760,17 +981,17 @@ private struct ResultRow: View, Equatable {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.title)
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(isSelected ? Color(white: 20 / 255) : Color(white: 35 / 255))
+                    .foregroundStyle(isSelected ? themeManager.colors.selectedItemTitleText : themeManager.colors.itemTitleText)
 
                 if let snippetSegments = visibleSnippetSegments {
-                    highlightedSnippetText(from: snippetSegments)
+                    highlightedSnippetText(from: snippetSegments, isSelected: isSelected)
                         .lineLimit(2)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
-            .background(isSelected ? Color(red: 230 / 255, green: 236 / 255, blue: 245 / 255) : Color.clear)
+            .background(isSelected ? themeManager.colors.selectedItemBackground : themeManager.colors.itemBackground)
         }
         .buttonStyle(.plain)
     }
@@ -796,17 +1017,25 @@ private struct ResultRow: View, Equatable {
         return segments
     }
 
-    private func highlightedSnippetText(from segments: [SnippetSegment]) -> Text {
+    private func highlightedSnippetText(from segments: [SnippetSegment], isSelected: Bool) -> Text {
         var attributed = AttributedString()
         for segment in segments {
             var part = AttributedString(segment.text)
             part.font = .system(size: 12, weight: .regular)
-            part.foregroundColor = segment.isHighlighted
-                ? Color(white: 20 / 255)
-                : Color(white: 70 / 255)
+            
+            // Use different colors based on selection state
+            if segment.isHighlighted {
+                part.foregroundColor = isSelected 
+                    ? themeManager.colors.selectedItemTitleText  // Highlighted text in selected item
+                    : themeManager.colors.itemTitleText           // Highlighted text in unselected item
+            } else {
+                part.foregroundColor = isSelected
+                    ? themeManager.colors.selectedItemSubtitleText  // Normal text in selected item
+                    : themeManager.colors.itemSubtitleText          // Normal text in unselected item
+            }
 
             if segment.isHighlighted {
-                part.backgroundColor = Color.yellow.opacity(0.55)
+                part.backgroundColor = themeManager.colors.highlightBackground
             }
 
             attributed.append(part)
@@ -847,8 +1076,217 @@ private struct ResultRow: View, Equatable {
 
 }
 
+private struct ResultsListView: View {
+    let results: [SearchResultRecord]
+    @Binding var selectedIndex: Int
+    @Binding var resultsScrollProxy: ScrollViewProxy?
+    let onActivate: (Int) -> Void
+    let onScrollProxySet: (ScrollViewProxy) -> Void
+    let onScrollSelection: (ScrollViewProxy, Bool) -> Void
+    @EnvironmentObject var themeManager: ThemeManager
+    
+    var body: some View {
+        if results.isEmpty {
+            emptyResultsView
+        } else {
+            resultsScrollView
+        }
+    }
+    
+    private var emptyResultsView: some View {
+        Text("No matching results. Press Enter to add this as a new entry.")
+            .font(.system(size: 13))
+            .italic()
+            .foregroundStyle(themeManager.colors.placeholderText)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+    
+    private var resultsScrollView: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                ResultsListItems(
+                    results: results,
+                    selectedIndex: $selectedIndex,
+                    onActivate: onActivate
+                )
+            }
+            .onAppear {
+                onScrollProxySet(proxy)
+                if selectedIndex > 0 {
+                    onScrollSelection(proxy, false)
+                }
+            }
+        }
+    }
+}
+
+private struct ResultsListItems: View {
+    let results: [SearchResultRecord]
+    @Binding var selectedIndex: Int
+    let onActivate: (Int) -> Void
+    @EnvironmentObject var themeManager: ThemeManager
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<results.count, id: \.self) { idx in
+                resultsItem(at: idx)
+            }
+        }
+    }
+    
+    private func resultsItem(at idx: Int) -> some View {
+        let item = results[idx]
+        let isSelected = idx == selectedIndex
+        return Group {
+            ResultRow(
+                item: item,
+                isSelected: isSelected,
+                onActivate: {
+                    selectedIndex = idx
+                    onActivate(idx)
+                }
+            )
+            .environmentObject(themeManager)
+            
+            if idx + 1 < results.count {
+                Divider()
+            }
+        }
+    }
+}
+
+private struct TabButton: View {
+    let tab: SettingsSheet.SettingsTab
+    let isSelected: Bool
+    let action: () -> Void
+    
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: tab.icon)
+                    .font(.system(size: 12, weight: .medium))
+                Text(tab.rawValue)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(isSelected ? Color(nsColor: .selectedControlColor) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? Color(nsColor: .selectedControlTextColor) : Color.primary)
+    }
+}
+
+private struct ColorPickerRow: View {
+    let label: String
+    @Binding var color: Color
+    
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 13))
+            Spacer()
+            ColorPicker("", selection: $color)
+                .labelsHidden()
+                .frame(width: 50)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct ThemeCard: View {
+    let theme: AppTheme
+    let isSelected: Bool
+    let action: () -> Void
+    @EnvironmentObject var themeManager: ThemeManager
+    
+    private var displayColors: ThemeColors {
+        theme.isCustom ? themeManager.customColors : theme.colors
+    }
+    
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 0) {
+                // Preview area
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(displayColors.launcherBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(displayColors.launcherBorder, lineWidth: 1)
+                        )
+                    
+                    VStack(spacing: 8) {
+                        // Search field preview
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .fill(displayColors.searchFieldBackground)
+                            .frame(height: 24)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    .stroke(displayColors.searchFieldBorder, lineWidth: 0.5)
+                            )
+                        
+                        // Results preview - shows both selected and unselected items
+                        VStack(spacing: 4) {
+                            // Selected item
+                            HStack(spacing: 4) {
+                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                    .fill(displayColors.selectedItemBackground)
+                                    .frame(width: 40, height: 18)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(displayColors.selectedItemTitleText.opacity(0.3))
+                                        .frame(width: 50, height: 6)
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(displayColors.selectedItemSubtitleText.opacity(0.2))
+                                        .frame(width: 35, height: 4)
+                                }
+                            }
+                            // Unselected item
+                            HStack(spacing: 4) {
+                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                    .fill(displayColors.itemBackground)
+                                    .frame(width: 40, height: 18)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(displayColors.itemTitleText.opacity(0.3))
+                                        .frame(width: 45, height: 6)
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(displayColors.itemSubtitleText.opacity(0.2))
+                                        .frame(width: 30, height: 4)
+                                }
+                            }
+                        }
+                    }
+                    .padding(10)
+                }
+                .frame(height: 90)
+                
+                // Name label
+                Text(theme.name)
+                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .foregroundStyle(isSelected ? themeManager.colors.accentColor : Color.primary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(isSelected ? themeManager.colors.accentColor.opacity(0.1) : Color.clear)
+            }
+        }
+        .buttonStyle(.plain)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isSelected ? themeManager.colors.accentColor : Color.clear, lineWidth: 2)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
 private struct EditorSheet: View {
     @ObservedObject var viewModel: LauncherViewModel
+    @EnvironmentObject var themeManager: ThemeManager
     @Environment(\.dismiss) private var dismiss
     @State private var editorCursorCharIndex: Int?
     @State private var isClosingEditor = false
@@ -857,6 +1295,7 @@ private struct EditorSheet: View {
         VStack(alignment: .leading, spacing: 12) {
             Text(viewModel.selectedItem?.title ?? "Editor")
                 .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(themeManager.colors.itemTitleText)
 
             InlineImageTextEditor(
                 text: $viewModel.editorText,
@@ -868,11 +1307,12 @@ private struct EditorSheet: View {
                 editorCursorCharIndex = cursorIndex
             }
             .padding(10)
-            .background(Color(nsColor: NSColor.textBackgroundColor))
+            .background(themeManager.colors.editorTextBackground)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .padding(16)
         .frame(minWidth: 760, minHeight: 500)
+        .background(themeManager.colors.editorBackground)
         .background(
             KeyEventMonitor { event in
                 handleEditorKeyEvent(event)

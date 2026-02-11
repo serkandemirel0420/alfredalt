@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "alfred_alt"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "directories",
