@@ -50,6 +50,238 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
         private var moveDragState: ImageMoveDragState?
         private var cursorState: CursorOverlay = .none
         private let moveDragThreshold: CGFloat = 5
+        
+        // MARK: - Paste Handling (Normalize to Plain Text)
+        
+        override func paste(_ sender: Any?) {
+            // Normalize pasted content to plain text, stripping HTML/tables/formatting
+            if let plainText = normalizedPlainTextFromPasteboard() {
+                insertNormalizedText(plainText)
+            } else {
+                super.paste(sender)
+            }
+        }
+        
+        override func pasteAsPlainText(_ sender: Any?) {
+            if let plainText = normalizedPlainTextFromPasteboard() {
+                insertNormalizedText(plainText)
+            } else {
+                super.pasteAsPlainText(sender)
+            }
+        }
+        
+        override func pasteAsRichText(_ sender: Any?) {
+            // Force paste as plain text even when rich text is requested
+            pasteAsPlainText(sender)
+        }
+        
+        /// Read content from pasteboard and extract plain text
+        private func normalizedPlainTextFromPasteboard() -> String? {
+            let pasteboard = NSPasteboard.general
+            
+            // First try to get plain string directly
+            if let plainString = pasteboard.string(forType: .string), !plainString.isEmpty {
+                return normalizePastedText(plainString)
+            }
+            
+            // If only attributed string is available, extract plain text
+            if let attributedString = pasteboard.readObjects(forClasses: [NSAttributedString.self], options: nil)?.first as? NSAttributedString {
+                let plainText = attributedString.string
+                return plainText.isEmpty ? nil : normalizePastedText(plainText)
+            }
+            
+            return nil
+        }
+        
+        /// Insert normalized text safely, preserving undo stack
+        private func insertNormalizedText(_ text: String) {
+            guard !text.isEmpty else { return }
+            
+            // Use standard insertText which respects the selected range and undo manager
+            // We wrap this in an undo grouping for cleaner undo behavior
+            let range = selectedRange()
+            
+            // Check if we should break undo coalescing
+            if range.length > 0 {
+                // Replacing selection - break coalescing
+                breakUndoCoalescing()
+            }
+            
+            insertText(text, replacementRange: range)
+        }
+        
+        /// Normalize pasted text: strip formatting, normalize whitespace, remove HTML artifacts
+        private func normalizePastedText(_ text: String) -> String {
+            var result = text
+            
+            // Step 1: Remove common HTML/XML tags and their content (like tables, scripts)
+            result = stripHTMLTags(result)
+            
+            // Step 2: Decode common HTML entities
+            result = decodeHTMLEntities(result)
+            
+            // Step 3: Normalize whitespace
+            result = normalizeWhitespace(result)
+            
+            // Step 4: Remove control characters except tab and newline
+            result = stripControlCharacters(result)
+            
+            return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        
+        /// Strip HTML tags from text
+        private func stripHTMLTags(_ text: String) -> String {
+            // Remove content within <script>, <style>, <table> tags (including the tags themselves)
+            var result = text
+            let tagPatterns = [
+                "<script[^>]*>.*?</script>",
+                "<style[^>]*>.*?</style>",
+                "<table[^>]*>.*?</table>",
+                "<thead[^>]*>.*?</thead>",
+                "<tbody[^>]*>.*?</tbody>",
+                "<tfoot[^>]*>.*?</tfoot>",
+                "<tr[^>]*>.*?</tr>",
+            ]
+            
+            for pattern in tagPatterns {
+                if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive, .dotMatchesLineSeparators]) {
+                    result = regex.stringByReplacingMatches(in: result, options: [], range: NSRange(location: 0, length: result.utf16.count), withTemplate: "\n")
+                }
+            }
+            
+            // Remove remaining HTML tags
+            if let tagRegex = try? NSRegularExpression(pattern: "<[^>]+>") {
+                result = tagRegex.stringByReplacingMatches(in: result, options: [], range: NSRange(location: 0, length: result.utf16.count), withTemplate: " ")
+            }
+            
+            return result
+        }
+        
+        /// Decode common HTML entities
+        private func decodeHTMLEntities(_ text: String) -> String {
+            var result = text
+            let entities: [(String, String)] = [
+                ("&amp;", "&"),
+                ("&lt;", "<"),
+                ("&gt;", ">"),
+                ("&quot;", "\""),
+                ("&#39;", "'"),
+                ("&nbsp;", " "),
+                ("&#160;", " "),
+                ("&#x20;", " "),
+                ("&#xA0;", " "),
+                ("&#10;", "\n"),
+                ("&#13;", ""),
+                ("&#x0A;", "\n"),
+                ("&#x0D;", ""),
+            ]
+            
+            for (entity, replacement) in entities {
+                result = result.replacingOccurrences(of: entity, with: replacement)
+            }
+            
+            // Handle numeric entities like &#123;
+            result = decodeNumericEntities(result)
+            
+            // Handle hex entities like &#x7B;
+            result = decodeHexEntities(result)
+            
+            return result
+        }
+        
+        /// Normalize whitespace: collapse multiple spaces/newlines
+        private func normalizeWhitespace(_ text: String) -> String {
+            var result = text
+            
+            // Normalize line endings to \n
+            result = result.replacingOccurrences(of: "\r\n", with: "\n")
+            result = result.replacingOccurrences(of: "\r", with: "\n")
+            
+            // Collapse horizontal whitespace (tabs, non-breaking spaces, etc.) to single space
+            let horizontalWhitespace = CharacterSet.whitespaces.subtracting(.newlines)
+            let components = result.components(separatedBy: horizontalWhitespace)
+            result = components.filter { !$0.isEmpty }.joined(separator: " ")
+            
+            // Collapse multiple spaces
+            while result.contains("  ") {
+                result = result.replacingOccurrences(of: "  ", with: " ")
+            }
+            
+            // Collapse 3+ consecutive newlines into 2 newlines (preserve paragraph breaks)
+            while result.contains("\n\n\n") {
+                result = result.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+            }
+            
+            return result
+        }
+        
+        /// Decode numeric HTML entities like &#123;
+        private func decodeNumericEntities(_ text: String) -> String {
+            var result = text
+            let pattern = "&#(\\d+);"
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                return result
+            }
+            
+            let matches = regex.matches(in: result, range: NSRange(location: 0, length: result.utf16.count))
+            // Process matches in reverse order to maintain string indices
+            for match in matches.reversed() {
+                guard let numberRange = Range(match.range(at: 1), in: result),
+                      let code = Int(result[numberRange]),
+                      let scalar = UnicodeScalar(code) else {
+                    continue
+                }
+                let replacement = String(Character(scalar))
+                if let fullRange = Range(match.range, in: result) {
+                    result.replaceSubrange(fullRange, with: replacement)
+                }
+            }
+            return result
+        }
+        
+        /// Decode hex HTML entities like &#x7B;
+        private func decodeHexEntities(_ text: String) -> String {
+            var result = text
+            let pattern = "&#x([0-9A-Fa-f]+);"
+            guard let regex = try? NSRegularExpression(pattern: pattern) else {
+                return result
+            }
+            
+            let matches = regex.matches(in: result, range: NSRange(location: 0, length: result.utf16.count))
+            // Process matches in reverse order to maintain string indices
+            for match in matches.reversed() {
+                guard let hexRange = Range(match.range(at: 1), in: result),
+                      let code = Int(result[hexRange], radix: 16),
+                      let scalar = UnicodeScalar(code) else {
+                    continue
+                }
+                let replacement = String(Character(scalar))
+                if let fullRange = Range(match.range, in: result) {
+                    result.replaceSubrange(fullRange, with: replacement)
+                }
+            }
+            return result
+        }
+        
+        /// Remove control characters except tab and newline
+        private func stripControlCharacters(_ text: String) -> String {
+            var allowed = CharacterSet.whitespacesAndNewlines
+            allowed.formUnion(.alphanumerics)
+            allowed.formUnion(.punctuationCharacters)
+            allowed.formUnion(.symbols)
+            allowed.formUnion(.decimalDigits)
+            allowed.formUnion(.letters)
+            // Include international characters
+            allowed.formUnion( CharacterSet(charactersIn: "\u{0080}"..."\u{FFFF}") )
+            
+            return text.unicodeScalars.filter { scalar in
+                if scalar.value < 32 {
+                    // Allow tab (9) and newline (10)
+                    return scalar.value == 9 || scalar.value == 10
+                }
+                return allowed.contains(scalar)
+            }.map(String.init).joined()
+        }
 
         private enum CursorOverlay {
             case none
@@ -493,7 +725,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
         textView.resizeDelegate = context.coordinator
         textView.isEditable = true
         textView.isSelectable = true
-        textView.isRichText = true
+        textView.isRichText = false  // Force plain text mode to prevent HTML/tables
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -511,6 +743,9 @@ struct InlineImageTextEditor: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
+        
+        // Register for plain text paste types only (prevents rich content/HTML pasting)
+        textView.registerForDraggedTypes([])  // Disable drag-and-drop of rich content
 
         scrollView.documentView = textView
         context.coordinator.textView = textView
@@ -602,13 +837,20 @@ struct InlineImageTextEditor: NSViewRepresentable {
             guard !isApplyingProgrammaticUpdate, let textView else {
                 return
             }
+            
+            // Defensive: ensure text storage exists
+            guard textView.textStorage != nil else {
+                return
+            }
 
             isApplyingProgrammaticUpdate = true
             normalizeVisibleTextAttributes(in: textView, fontSize: parent.fontSize)
             applyEditorTypingAppearance(to: textView, fontSize: parent.fontSize)
             isApplyingProgrammaticUpdate = false
 
+            // Safely extract plain text
             let plain = makePlainText(from: textView.attributedString())
+            
             if plain != parent.text {
                 parent.text = plain
                 lastRenderedText = plain
@@ -745,15 +987,18 @@ private func highlightSearchTerms(in attributedString: NSMutableAttributedString
     let terms = query.split(separator: " ").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
     guard !terms.isEmpty else { return }
 
-    let string = attributedString.string
-    let text = string.lowercased() as NSString
-    let fullRange = NSRange(location: 0, length: text.length)
+    let string = attributedString.string as NSString
+    let fullRange = NSRange(location: 0, length: string.length)
 
     for term in terms {
         var searchRange = fullRange
-        while searchRange.location < text.length {
-            let foundRange = text.range(of: term, options: [], range: searchRange)
+        while searchRange.location < string.length {
+            // Use caseInsensitive search directly on original string to avoid Unicode range mismatches
+            let foundRange = string.range(of: term, options: .caseInsensitive, range: searchRange)
             if foundRange.location != NSNotFound {
+                // Defensive: ensure range is within bounds
+                guard NSMaxRange(foundRange) <= string.length else { break }
+                
                 attributedString.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.4), range: foundRange)
                 attributedString.addAttribute(.foregroundColor, value: NSColor.black, range: foundRange)
 
@@ -804,10 +1049,16 @@ private func normalizeVisibleTextAttributes(in textView: NSTextView, fontSize: C
 private func makePlainText(from attributed: NSAttributedString) -> String {
     var output = ""
     let fullRange = NSRange(location: 0, length: attributed.length)
+    
+    // Defensive: check for valid range
+    guard fullRange.length >= 0 else {
+        return attributed.string
+    }
 
-    attributed.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
+    attributed.enumerateAttributes(in: fullRange, options: []) { attrs, range, stop in
+        // Check if this is an image attachment
         if let key = attrs[imageKeyAttribute] as? String {
-            let width = (attrs[imageWidthAttribute] as? Int)
+            let width = attrs[imageWidthAttribute] as? Int
             if let width {
                 output += "![image](alfred://image/\(key)?w=\(width))"
             } else {
@@ -816,9 +1067,17 @@ private func makePlainText(from attributed: NSAttributedString) -> String {
             return
         }
 
-        if let subrange = Range(range, in: attributed.string) {
-            output += String(attributed.string[subrange])
+        // Safely extract text from this range
+        let rangeEnd = min(range.location + range.length, attributed.string.utf16.count)
+        guard range.location >= 0, range.location < rangeEnd else {
+            return
         }
+        
+        let safeRange = NSRange(location: range.location, length: rangeEnd - range.location)
+        guard let swiftRange = Range(safeRange, in: attributed.string) else {
+            return
+        }
+        output += String(attributed.string[swiftRange])
     }
 
     return output

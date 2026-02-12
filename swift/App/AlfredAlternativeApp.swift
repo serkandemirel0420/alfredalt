@@ -78,6 +78,12 @@ struct AlfredAlternativeApp: App {
                 .environmentObject(viewModel)
                 .environmentObject(updateChecker)
                 .environmentObject(themeManager)
+                .onAppear {
+                    // Bring settings window to front when opened
+                    DispatchQueue.main.async {
+                        NSApp.windows.first { $0.title == "Settings" }?.makeKeyAndOrderFront(nil)
+                    }
+                }
         }
         .defaultSize(width: 800, height: 550)
         .defaultPosition(.center)

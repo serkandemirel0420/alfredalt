@@ -67,6 +67,7 @@ struct ContentView: View {
     @State private var actionMenuTarget: SearchResultRecord?
     @State private var actionMenuSelectedIndex = 0
     @State private var actionMenuFilter = ""
+    @State private var firstVisibleRow: Int = 0
 
     private var filteredActions: [ItemAction] {
         let filter = actionMenuFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -77,7 +78,8 @@ struct ContentView: View {
     }
 
     private var resultsViewportHeight: CGFloat {
-        launcherResultRowHeight * launcherMaxVisibleRows
+        // Add 2px per row for dividers, plus a bit of extra space to prevent cut-off
+        launcherResultRowHeight * launcherMaxVisibleRows + (launcherMaxVisibleRows * 2) + 4
     }
 
     var body: some View {
@@ -131,16 +133,14 @@ struct ContentView: View {
             } else if selectedIndex >= viewModel.results.count {
                 selectedIndex = max(0, viewModel.results.count - 1)
             }
-
-            if selectedIndex > 0, let proxy = resultsScrollProxy {
-                scrollSelectionIntoView(using: proxy, animated: false)
-            }
+            // Reset firstVisibleRow when results change
+            firstVisibleRow = max(0, selectedIndex - Int(launcherMaxVisibleRows) + 1)
         }
         .onChange(of: selectedIndex) { oldValue, newValue in
             guard oldValue != newValue, let proxy = resultsScrollProxy else {
                 return
             }
-            scrollSelectionIntoView(using: proxy, animated: false)
+            handleSelectionChange(oldValue: oldValue, newValue: newValue, proxy: proxy)
         }
         .onChange(of: viewModel.launcherFocusRequestID) { _, _ in
             searchFieldFocused = true
@@ -193,9 +193,11 @@ struct ContentView: View {
             if actions.indices.contains(actionMenuSelectedIndex) {
                 executeAction(actions[actionMenuSelectedIndex], on: target)
             }
-        } else {
+        } else if !viewModel.results.isEmpty {
+            // Only open existing items with Enter (not create new)
             activateCurrentSelection()
         }
+        // When results are empty, do nothing (Shift+Enter is required to create new)
     }
     
     @ViewBuilder
@@ -272,14 +274,44 @@ struct ContentView: View {
         }
     }
 
+    private var lastVisibleRow: Int {
+        min(viewModel.results.count - 1, firstVisibleRow + Int(launcherMaxVisibleRows) - 1)
+    }
+    
+    private func handleSelectionChange(oldValue: Int, newValue: Int, proxy: ScrollViewProxy) {
+        let maxVisible = Int(launcherMaxVisibleRows)
+        
+        // Moving down
+        if newValue > oldValue {
+            // If selection goes past the last fully visible row, scroll down
+            if newValue > lastVisibleRow {
+                firstVisibleRow = newValue - maxVisible + 1
+                withAnimation(.easeInOut(duration: 0.14)) {
+                    proxy.scrollTo(newValue, anchor: .bottom)
+                }
+            }
+            // If already visible, do nothing
+        }
+        // Moving up
+        else if newValue < oldValue {
+            // If selection goes before the first visible row, scroll up
+            if newValue < firstVisibleRow {
+                firstVisibleRow = newValue
+                withAnimation(.easeInOut(duration: 0.14)) {
+                    proxy.scrollTo(newValue, anchor: .top)
+                }
+            }
+            // If already visible, do nothing
+        }
+    }
+
     private func scrollSelectionIntoView(using proxy: ScrollViewProxy, animated: Bool) {
         guard viewModel.results.indices.contains(selectedIndex) else {
             return
         }
 
-        let targetID = viewModel.results[selectedIndex].id
         let scrollAction = {
-            proxy.scrollTo(targetID)
+            proxy.scrollTo(selectedIndex, anchor: .top)
         }
 
         if animated {
@@ -461,6 +493,18 @@ struct ContentView: View {
             }
         }
 
+        // Handle Shift+Enter - always create new item
+        if modifiers == .shift && (event.keyCode == 36 || event.keyCode == 76) {
+            Task {
+                let created = await viewModel.createItemFromQuery()
+                if created {
+                    viewModel.beginEditorPresentation()
+                    openWindow(id: "editor")
+                }
+            }
+            return true
+        }
+        
         if !modifiers.isEmpty {
             return false
         }
@@ -479,7 +523,10 @@ struct ContentView: View {
             searchFieldFocused = true
             return true
         case 36, 76: // return / enter
-            activateCurrentSelection()
+            // Only activate if there are results (Shift+Enter is required to create new)
+            if !viewModel.results.isEmpty {
+                activateCurrentSelection()
+            }
             return true
         case 53: // escape
             viewModel.dismissLauncher()
@@ -734,7 +781,7 @@ private struct ResultsListView: View {
     }
     
     private var emptyResultsView: some View {
-        Text("No matching results. Press Enter to add this as a new entry.")
+        Text("No matching results. Press Shift+Enter to create a new entry.")
             .font(.system(size: 13))
             .italic()
             .foregroundStyle(themeManager.colors.placeholderText)
@@ -752,9 +799,6 @@ private struct ResultsListView: View {
             }
             .onAppear {
                 onScrollProxySet(proxy)
-                if selectedIndex > 0 {
-                    onScrollSelection(proxy, false)
-                }
             }
         }
     }
@@ -768,14 +812,13 @@ private struct ResultsListItems: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(0..<results.count, id: \.self) { idx in
-                resultsItem(at: idx)
+            ForEach(Array(results.enumerated()), id: \.element.id) { idx, item in
+                resultsItem(at: idx, item: item)
             }
         }
     }
     
-    private func resultsItem(at idx: Int) -> some View {
-        let item = results[idx]
+    private func resultsItem(at idx: Int, item: SearchResultRecord) -> some View {
         let isSelected = idx == selectedIndex
         return Group {
             ResultRow(
@@ -787,6 +830,7 @@ private struct ResultsListItems: View {
                 }
             )
             .environmentObject(themeManager)
+            .id(idx)  // Use index for ScrollViewProxy scrolling
             
             if idx + 1 < results.count {
                 Divider()

@@ -115,6 +115,14 @@ pub fn search_items(
     query: String,
     limit: Option<u32>,
 ) -> Result<Vec<SearchResultRecord>, BackendError> {
+    // Limit query length to prevent potential issues
+    const MAX_QUERY_LENGTH: usize = 1024;
+    let query = if query.len() > MAX_QUERY_LENGTH {
+        query.chars().take(MAX_QUERY_LENGTH).collect()
+    } else {
+        query
+    };
+    
     let limit = normalize_limit(limit)?;
     let results = db::search(&query, i64::from(limit)).map_err(map_anyhow)?;
     Ok(results.into_iter().map(SearchResultRecord::from).collect())
@@ -122,14 +130,46 @@ pub fn search_items(
 
 #[uniffi::export]
 pub fn create_item(title: String) -> Result<i64, BackendError> {
+    // Sanitize and validate title
+    const MAX_TITLE_LENGTH: usize = 10_000; // 10KB limit for title
+    let title = sanitize_title(&title);
     let title = title.trim();
+    
     if title.is_empty() {
         return Err(BackendError::Validation(
             "title must not be empty".to_string(),
         ));
     }
+    
+    if title.len() > MAX_TITLE_LENGTH {
+        return Err(BackendError::Validation(
+            "title exceeds maximum length".to_string(),
+        ));
+    }
 
     db::insert_item(title).map_err(map_anyhow)
+}
+
+/// Sanitize title by removing problematic characters
+fn sanitize_title(title: &str) -> String {
+    title
+        .chars()
+        .filter(|&c| {
+            // Allow printable characters and common whitespace
+            if c == '\n' || c == '\t' || c == '\r' {
+                return true;
+            }
+            // Remove null bytes and other control characters
+            if c < ' ' {
+                return false;
+            }
+            // Remove replacement character and byte order mark
+            if c == '\u{FFFD}' || c == '\u{FEFF}' {
+                return false;
+            }
+            true
+        })
+        .collect()
 }
 
 #[uniffi::export]
@@ -147,8 +187,40 @@ pub fn save_item(
 ) -> Result<(), BackendError> {
     ensure_item_id(item_id)?;
 
+    // Validate note length (prevent excessively large notes that could cause issues)
+    const MAX_NOTE_LENGTH: usize = 10_000_000; // 10MB limit
+    if note.len() > MAX_NOTE_LENGTH {
+        return Err(BackendError::Validation(
+            "note exceeds maximum length".to_string(),
+        ));
+    }
+
+    // Sanitize note: remove null bytes and other control characters that could cause issues
+    let sanitized_note = sanitize_note_for_storage(&note);
+
     let image_models: Vec<NoteImage> = images.into_iter().map(NoteImage::from).collect();
-    db::update_item(item_id, &note, Some(&image_models)).map_err(map_anyhow)
+    db::update_item(item_id, &sanitized_note, Some(&image_models)).map_err(map_anyhow)
+}
+
+/// Sanitize note text by removing problematic characters
+fn sanitize_note_for_storage(note: &str) -> String {
+    note.chars()
+        .filter(|&c| {
+            // Allow printable characters and common whitespace
+            if c == '\n' || c == '\t' || c == '\r' {
+                return true;
+            }
+            // Remove null bytes and other control characters
+            if c < ' ' {
+                return false;
+            }
+            // Remove replacement character and other special unicode
+            if c == '\u{FFFD}' || c == '\u{FEFF}' {
+                return false;
+            }
+            true
+        })
+        .collect()
 }
 
 #[uniffi::export]
