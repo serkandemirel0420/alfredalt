@@ -68,6 +68,7 @@ struct ContentView: View {
     @State private var actionMenuSelectedIndex = 0
     @State private var actionMenuFilter = ""
     @State private var firstVisibleRow: Int = 0
+    @State private var isScrolling = false
 
     private var filteredActions: [ItemAction] {
         let filter = actionMenuFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -278,48 +279,51 @@ struct ContentView: View {
         min(viewModel.results.count - 1, firstVisibleRow + Int(launcherMaxVisibleRows) - 1)
     }
     
+    private func scrollTargetID(for index: Int) -> String {
+        guard viewModel.results.indices.contains(index) else { return "" }
+        let item = viewModel.results[index]
+        return "\(index)_\(item.id)"
+    }
+    
     private func handleSelectionChange(oldValue: Int, newValue: Int, proxy: ScrollViewProxy) {
+        guard !isScrolling else { return }
+        
         let maxVisible = Int(launcherMaxVisibleRows)
+        let needsScroll: Bool
         
         // Moving down
         if newValue > oldValue {
-            // If selection goes past the last fully visible row, scroll down
-            if newValue > lastVisibleRow {
+            needsScroll = newValue > lastVisibleRow
+            if needsScroll {
                 firstVisibleRow = newValue - maxVisible + 1
-                withAnimation(.easeInOut(duration: 0.14)) {
-                    proxy.scrollTo(newValue, anchor: .bottom)
-                }
             }
-            // If already visible, do nothing
         }
         // Moving up
         else if newValue < oldValue {
-            // If selection goes before the first visible row, scroll up
-            if newValue < firstVisibleRow {
+            needsScroll = newValue < firstVisibleRow
+            if needsScroll {
                 firstVisibleRow = newValue
-                withAnimation(.easeInOut(duration: 0.14)) {
-                    proxy.scrollTo(newValue, anchor: .top)
-                }
             }
-            // If already visible, do nothing
+        } else {
+            needsScroll = false
+        }
+        
+        if needsScroll {
+            isScrolling = true
+            proxy.scrollTo(scrollTargetID(for: newValue), anchor: newValue > oldValue ? .bottom : .top)
+            // Reset scrolling flag after a short delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                isScrolling = false
+            }
         }
     }
 
     private func scrollSelectionIntoView(using proxy: ScrollViewProxy, animated: Bool) {
-        guard viewModel.results.indices.contains(selectedIndex) else {
-            return
-        }
-
-        let scrollAction = {
-            proxy.scrollTo(selectedIndex, anchor: .top)
-        }
-
-        if animated {
-            withAnimation(.easeInOut(duration: 0.14)) {
-                scrollAction()
-            }
-        } else {
-            scrollAction()
+        guard !isScrolling else { return }
+        isScrolling = true
+        proxy.scrollTo(scrollTargetID(for: selectedIndex), anchor: .top)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            isScrolling = false
         }
     }
 
@@ -830,10 +834,12 @@ private struct ResultsListItems: View {
                 }
             )
             .environmentObject(themeManager)
-            .id(idx)  // Use index for ScrollViewProxy scrolling
+            // Stable ID combining item ID with index to prevent re-rendering issues
+            .id("\(idx)_\(item.id)")
             
             if idx + 1 < results.count {
                 Divider()
+                    .id("divider_\(idx)")
             }
         }
     }
