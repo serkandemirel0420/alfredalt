@@ -24,6 +24,7 @@ private enum ItemAction: Int, CaseIterable {
     case openEditor
     case showJsonInFinder
     case copyTitle
+    case openSettings
     case delete
 
     var label: String {
@@ -31,6 +32,7 @@ private enum ItemAction: Int, CaseIterable {
         case .openEditor: return "Open in Editor"
         case .showJsonInFinder: return "Show JSON in Finder"
         case .copyTitle: return "Copy Title"
+        case .openSettings: return "Settings"
         case .delete: return "Delete"
         }
     }
@@ -40,12 +42,17 @@ private enum ItemAction: Int, CaseIterable {
         case .openEditor: return "doc.text"
         case .showJsonInFinder: return "folder"
         case .copyTitle: return "doc.on.doc"
+        case .openSettings: return "gear"
         case .delete: return "trash"
         }
     }
 
     var isDestructive: Bool {
         self == .delete
+    }
+    
+    var isSeparatorBefore: Bool {
+        self == .openSettings || self == .delete
     }
 }
 
@@ -339,28 +346,37 @@ struct ContentView: View {
             } else {
                 ForEach(Array(actions.enumerated()), id: \.element.rawValue) { idx, action in
                     let isSelected = idx == actionMenuSelectedIndex
-                    Button {
-                        executeAction(action, on: target)
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: action.systemImage)
-                                .font(.system(size: 15))
-                                .frame(width: 22)
-                                .foregroundStyle(action.isDestructive ? themeManager.colors.destructiveAction : themeManager.colors.itemSubtitleText)
-                            Text(action.label)
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundStyle(action.isDestructive ? themeManager.colors.destructiveAction : themeManager.colors.itemTitleText)
-                            Spacer()
+                    
+                    // Add separator before certain actions
+                    VStack(spacing: 0) {
+                        if action.isSeparatorBefore && idx > 0 {
+                            Divider()
+                                .padding(.leading, 12)
+                                .padding(.trailing, 12)
+                                .padding(.vertical, 4)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(isSelected ? themeManager.colors.selectedItemBackground : themeManager.colors.itemBackground)
-                    }
-                    .buttonStyle(.plain)
-
-                    if idx + 1 < actions.count {
-                        Divider().padding(.leading, 44)
+                        
+                        Button {
+                            executeAction(action, on: target)
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: action.systemImage)
+                                    .font(.system(size: 15))
+                                    .frame(width: 22)
+                                    .foregroundStyle(actionIconColor(action: action, isSelected: isSelected))
+                                Text(action.label)
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundStyle(actionTextColor(action: action, isSelected: isSelected))
+                                Spacer()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(isSelected ? themeManager.colors.selectedItemBackground : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 4)
                     }
                 }
             }
@@ -383,11 +399,30 @@ struct ContentView: View {
             viewModel.revealItemJsonInFinder(itemId: target.id)
         case .copyTitle:
             viewModel.copyItemTitle(target.title)
+        case .openSettings:
+            viewModel.prepareSettings()
+            openWindow(id: "settings")
         case .delete:
             Task {
                 await viewModel.deleteItem(itemId: target.id)
             }
         }
+    }
+    
+    // MARK: - Action Menu Styling
+    
+    private func actionTextColor(action: ItemAction, isSelected: Bool) -> Color {
+        if action.isDestructive {
+            return themeManager.colors.destructiveAction
+        }
+        return isSelected ? themeManager.colors.selectedItemTitleText : themeManager.colors.itemTitleText
+    }
+    
+    private func actionIconColor(action: ItemAction, isSelected: Bool) -> Color {
+        if action.isDestructive {
+            return themeManager.colors.destructiveAction
+        }
+        return isSelected ? themeManager.colors.selectedItemSubtitleText : themeManager.colors.itemSubtitleText
     }
 
     private func handleLauncherKeyEvent(_ event: NSEvent) -> Bool {
