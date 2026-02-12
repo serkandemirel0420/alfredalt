@@ -161,32 +161,32 @@ private struct ThemeColorsData: Codable {
 // MARK: - Predefined Themes
 
 extension AppTheme {
-    // MARK: Default (Light)
+    // MARK: Default (Spotlight Style)
     static let `default` = AppTheme(
         id: "default",
         name: "Default",
         colors: ThemeColors(
-            launcherBackground: Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255),
-            searchFieldBackground: Color(red: 250 / 255, green: 250 / 255, blue: 250 / 255, opacity: 252 / 255),
-            searchFieldBorder: Color.black.opacity(0.12),
-            launcherBorder: Color.black.opacity(35 / 255),
+            launcherBackground: Color(red: 230 / 255, green: 226 / 255, blue: 235 / 255),
+            searchFieldBackground: Color(red: 245 / 255, green: 243 / 255, blue: 247 / 255),
+            searchFieldBorder: Color.black.opacity(0.08),
+            launcherBorder: Color.black.opacity(0.15),
             resultsBackground: Color.clear,
-            placeholderText: Color(white: 150 / 255),
+            placeholderText: Color(red: 120 / 255, green: 120 / 255, blue: 130 / 255),
             itemBackground: Color.clear,
-            itemTitleText: Color(white: 35 / 255),
-            itemSubtitleText: Color(white: 70 / 255),
-            selectedItemBackground: Color(red: 230 / 255, green: 236 / 255, blue: 245 / 255),
-            selectedItemTitleText: Color(white: 20 / 255),
-            selectedItemSubtitleText: Color(white: 70 / 255),
-            highlightBackground: Color.yellow.opacity(0.55),
-            actionMenuHeaderBackground: Color(white: 240 / 255),
-            actionMenuHeaderText: Color(white: 50 / 255),
+            itemTitleText: Color(red: 40 / 255, green: 40 / 255, blue: 45 / 255),
+            itemSubtitleText: Color(red: 100 / 255, green: 100 / 255, blue: 110 / 255),
+            selectedItemBackground: Color(red: 94 / 255, green: 42 / 255, blue: 126 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 220 / 255, green: 210 / 255, blue: 230 / 255),
+            highlightBackground: Color.yellow.opacity(0.5),
+            actionMenuHeaderBackground: Color(red: 220 / 255, green: 216 / 255, blue: 225 / 255),
+            actionMenuHeaderText: Color(red: 60 / 255, green: 60 / 255, blue: 65 / 255),
             destructiveAction: Color.red,
-            editorBackground: Color(nsColor: .windowBackgroundColor),
-            editorTextBackground: Color(nsColor: .textBackgroundColor),
-            accentColor: Color(nsColor: .systemBlue),
-            successColor: Color(nsColor: .systemGreen),
-            errorColor: Color(nsColor: .systemRed)
+            editorBackground: Color(red: 245 / 255, green: 243 / 255, blue: 247 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 94 / 255, green: 42 / 255, blue: 126 / 255),
+            successColor: Color(red: 50 / 255, green: 170 / 255, blue: 80 / 255),
+            errorColor: Color.red
         ),
         isCustom: false
     )
@@ -366,6 +366,336 @@ extension AppTheme {
         errorColor: Color(red: 255 / 255, green: 100 / 255, blue: 100 / 255)
     )
     
+    // MARK: Ocean Blue
+    static let oceanBlue = AppTheme(
+        id: "oceanBlue",
+        name: "Ocean Blue",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 230 / 255, green: 240 / 255, blue: 250 / 255),
+            searchFieldBackground: Color(red: 245 / 255, green: 248 / 255, blue: 252 / 255),
+            searchFieldBorder: Color(red: 100 / 255, green: 150 / 255, blue: 200 / 255).opacity(0.3),
+            launcherBorder: Color(red: 80 / 255, green: 130 / 255, blue: 180 / 255).opacity(0.4),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 100 / 255, green: 130 / 255, blue: 160 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 30 / 255, green: 60 / 255, blue: 100 / 255),
+            itemSubtitleText: Color(red: 80 / 255, green: 110 / 255, blue: 140 / 255),
+            selectedItemBackground: Color(red: 40 / 255, green: 100 / 255, blue: 160 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 200 / 255, green: 220 / 255, blue: 240 / 255),
+            highlightBackground: Color.cyan.opacity(0.4),
+            actionMenuHeaderBackground: Color(red: 220 / 255, green: 230 / 255, blue: 240 / 255),
+            actionMenuHeaderText: Color(red: 50 / 255, green: 80 / 255, blue: 120 / 255),
+            destructiveAction: Color(red: 200 / 255, green: 60 / 255, blue: 60 / 255),
+            editorBackground: Color(red: 240 / 255, green: 246 / 255, blue: 252 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 40 / 255, green: 100 / 255, blue: 160 / 255),
+            successColor: Color(red: 50 / 255, green: 160 / 255, blue: 90 / 255),
+            errorColor: Color(red: 200 / 255, green: 60 / 255, blue: 60 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Cherry Blossom
+    static let cherryBlossom = AppTheme(
+        id: "cherryBlossom",
+        name: "Cherry Blossom",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 252 / 255, green: 235 / 255, blue: 240 / 255),
+            searchFieldBackground: Color(red: 255 / 255, green: 245 / 255, blue: 248 / 255),
+            searchFieldBorder: Color(red: 220 / 255, green: 160 / 255, blue: 180 / 255).opacity(0.4),
+            launcherBorder: Color(red: 200 / 255, green: 140 / 255, blue: 160 / 255).opacity(0.5),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 160 / 255, green: 120 / 255, blue: 140 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 80 / 255, green: 40 / 255, blue: 60 / 255),
+            itemSubtitleText: Color(red: 140 / 255, green: 100 / 255, blue: 120 / 255),
+            selectedItemBackground: Color(red: 200 / 255, green: 100 / 255, blue: 140 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 255 / 255, green: 220 / 255, blue: 230 / 255),
+            highlightBackground: Color.yellow.opacity(0.5),
+            actionMenuHeaderBackground: Color(red: 245 / 255, green: 225 / 255, blue: 232 / 255),
+            actionMenuHeaderText: Color(red: 100 / 255, green: 60 / 255, blue: 80 / 255),
+            destructiveAction: Color(red: 180 / 255, green: 50 / 255, blue: 70 / 255),
+            editorBackground: Color(red: 255 / 255, green: 245 / 255, blue: 248 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 200 / 255, green: 100 / 255, blue: 140 / 255),
+            successColor: Color(red: 80 / 255, green: 160 / 255, blue: 100 / 255),
+            errorColor: Color(red: 180 / 255, green: 50 / 255, blue: 70 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Sunset Orange
+    static let sunsetOrange = AppTheme(
+        id: "sunsetOrange",
+        name: "Sunset Orange",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 255 / 255, green: 240 / 255, blue: 230 / 255),
+            searchFieldBackground: Color(red: 255 / 255, green: 248 / 255, blue: 242 / 255),
+            searchFieldBorder: Color(red: 230 / 255, green: 140 / 255, blue: 100 / 255).opacity(0.4),
+            launcherBorder: Color(red: 220 / 255, green: 120 / 255, blue: 80 / 255).opacity(0.5),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 160 / 255, green: 120 / 255, blue: 100 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 100 / 255, green: 50 / 255, blue: 30 / 255),
+            itemSubtitleText: Color(red: 150 / 255, green: 100 / 255, blue: 80 / 255),
+            selectedItemBackground: Color(red: 220 / 255, green: 100 / 255, blue: 60 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 255 / 255, green: 220 / 255, blue: 200 / 255),
+            highlightBackground: Color.yellow.opacity(0.5),
+            actionMenuHeaderBackground: Color(red: 250 / 255, green: 230 / 255, blue: 220 / 255),
+            actionMenuHeaderText: Color(red: 120 / 255, green: 70 / 255, blue: 50 / 255),
+            destructiveAction: Color(red: 180 / 255, green: 40 / 255, blue: 60 / 255),
+            editorBackground: Color(red: 255 / 255, green: 248 / 255, blue: 242 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 220 / 255, green: 100 / 255, blue: 60 / 255),
+            successColor: Color(red: 60 / 255, green: 150 / 255, blue: 80 / 255),
+            errorColor: Color(red: 180 / 255, green: 40 / 255, blue: 60 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Slate Gray
+    static let slateGray = AppTheme(
+        id: "slateGray",
+        name: "Slate Gray",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 220 / 255, green: 225 / 255, blue: 230 / 255),
+            searchFieldBackground: Color(red: 235 / 255, green: 238 / 255, blue: 242 / 255),
+            searchFieldBorder: Color(red: 120 / 255, green: 130 / 255, blue: 140 / 255).opacity(0.4),
+            launcherBorder: Color(red: 100 / 255, green: 110 / 255, blue: 120 / 255).opacity(0.5),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 130 / 255, green: 135 / 255, blue: 140 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 50 / 255, green: 55 / 255, blue: 60 / 255),
+            itemSubtitleText: Color(red: 100 / 255, green: 105 / 255, blue: 110 / 255),
+            selectedItemBackground: Color(red: 80 / 255, green: 90 / 255, blue: 100 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 210 / 255, green: 215 / 255, blue: 220 / 255),
+            highlightBackground: Color.yellow.opacity(0.5),
+            actionMenuHeaderBackground: Color(red: 210 / 255, green: 215 / 255, blue: 220 / 255),
+            actionMenuHeaderText: Color(red: 60 / 255, green: 65 / 255, blue: 70 / 255),
+            destructiveAction: Color(red: 180 / 255, green: 50 / 255, blue: 60 / 255),
+            editorBackground: Color(red: 235 / 255, green: 238 / 255, blue: 242 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 80 / 255, green: 90 / 255, blue: 100 / 255),
+            successColor: Color(red: 60 / 255, green: 140 / 255, blue: 80 / 255),
+            errorColor: Color(red: 180 / 255, green: 50 / 255, blue: 60 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Mint Green
+    static let mintGreen = AppTheme(
+        id: "mintGreen",
+        name: "Mint Green",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 230 / 255, green: 248 / 255, blue: 240 / 255),
+            searchFieldBackground: Color(red: 242 / 255, green: 252 / 255, blue: 248 / 255),
+            searchFieldBorder: Color(red: 120 / 255, green: 200 / 255, blue: 160 / 255).opacity(0.4),
+            launcherBorder: Color(red: 100 / 255, green: 180 / 255, blue: 140 / 255).opacity(0.5),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 100 / 255, green: 140 / 255, blue: 120 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 30 / 255, green: 80 / 255, blue: 60 / 255),
+            itemSubtitleText: Color(red: 80 / 255, green: 130 / 255, blue: 100 / 255),
+            selectedItemBackground: Color(red: 60 / 255, green: 160 / 255, blue: 120 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 210 / 255, green: 245 / 255, blue: 230 / 255),
+            highlightBackground: Color.yellow.opacity(0.5),
+            actionMenuHeaderBackground: Color(red: 220 / 255, green: 240 / 255, blue: 232 / 255),
+            actionMenuHeaderText: Color(red: 50 / 255, green: 100 / 255, blue: 80 / 255),
+            destructiveAction: Color(red: 180 / 255, green: 60 / 255, blue: 70 / 255),
+            editorBackground: Color(red: 242 / 255, green: 252 / 255, blue: 248 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 60 / 255, green: 160 / 255, blue: 120 / 255),
+            successColor: Color(red: 50 / 255, green: 150 / 255, blue: 80 / 255),
+            errorColor: Color(red: 180 / 255, green: 60 / 255, blue: 70 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Coral Reef
+    static let coralReef = AppTheme(
+        id: "coralReef",
+        name: "Coral Reef",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 255 / 255, green: 235 / 255, blue: 230 / 255),
+            searchFieldBackground: Color(red: 255 / 255, green: 245 / 255, blue: 242 / 255),
+            searchFieldBorder: Color(red: 240 / 255, green: 140 / 255, blue: 130 / 255).opacity(0.4),
+            launcherBorder: Color(red: 230 / 255, green: 120 / 255, blue: 110 / 255).opacity(0.5),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 170 / 255, green: 120 / 255, blue: 110 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 110 / 255, green: 50 / 255, blue: 40 / 255),
+            itemSubtitleText: Color(red: 160 / 255, green: 100 / 255, blue: 90 / 255),
+            selectedItemBackground: Color(red: 230 / 255, green: 100 / 255, blue: 90 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 255 / 255, green: 220 / 255, blue: 215 / 255),
+            highlightBackground: Color.yellow.opacity(0.5),
+            actionMenuHeaderBackground: Color(red: 250 / 255, green: 225 / 255, blue: 220 / 255),
+            actionMenuHeaderText: Color(red: 130 / 255, green: 70 / 255, blue: 60 / 255),
+            destructiveAction: Color(red: 180 / 255, green: 50 / 255, blue: 70 / 255),
+            editorBackground: Color(red: 255 / 255, green: 245 / 255, blue: 242 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 230 / 255, green: 100 / 255, blue: 90 / 255),
+            successColor: Color(red: 60 / 255, green: 150 / 255, blue: 100 / 255),
+            errorColor: Color(red: 180 / 255, green: 50 / 255, blue: 70 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Deep Space
+    static let deepSpace = AppTheme(
+        id: "deepSpace",
+        name: "Deep Space",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 15 / 255, green: 15 / 255, blue: 25 / 255),
+            searchFieldBackground: Color(red: 30 / 255, green: 30 / 255, blue: 45 / 255),
+            searchFieldBorder: Color(red: 80 / 255, green: 80 / 255, blue: 120 / 255).opacity(0.5),
+            launcherBorder: Color(red: 60 / 255, green: 60 / 255, blue: 100 / 255).opacity(0.6),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 100 / 255, green: 100 / 255, blue: 130 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 220 / 255, green: 220 / 255, blue: 245 / 255),
+            itemSubtitleText: Color(red: 150 / 255, green: 150 / 255, blue: 180 / 255),
+            selectedItemBackground: Color(red: 100 / 255, green: 80 / 255, blue: 180 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 200 / 255, green: 190 / 255, blue: 230 / 255),
+            highlightBackground: Color(red: 255 / 255, green: 200 / 255, blue: 100 / 255).opacity(0.4),
+            actionMenuHeaderBackground: Color(red: 25 / 255, green: 25 / 255, blue: 40 / 255),
+            actionMenuHeaderText: Color(red: 180 / 255, green: 180 / 255, blue: 210 / 255),
+            destructiveAction: Color(red: 255 / 255, green: 100 / 255, blue: 120 / 255),
+            editorBackground: Color(red: 20 / 255, green: 20 / 255, blue: 35 / 255),
+            editorTextBackground: Color(red: 35 / 255, green: 35 / 255, blue: 50 / 255),
+            accentColor: Color(red: 140 / 255, green: 120 / 255, blue: 220 / 255),
+            successColor: Color(red: 100 / 255, green: 220 / 255, blue: 140 / 255),
+            errorColor: Color(red: 255 / 255, green: 100 / 255, blue: 120 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Coffee Cream
+    static let coffeeCream = AppTheme(
+        id: "coffeeCream",
+        name: "Coffee Cream",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 245 / 255, green: 235 / 255, blue: 220 / 255),
+            searchFieldBackground: Color(red: 252 / 255, green: 248 / 255, blue: 242 / 255),
+            searchFieldBorder: Color(red: 180 / 255, green: 150 / 255, blue: 120 / 255).opacity(0.4),
+            launcherBorder: Color(red: 160 / 255, green: 130 / 255, blue: 100 / 255).opacity(0.5),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 140 / 255, green: 120 / 255, blue: 100 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 80 / 255, green: 60 / 255, blue: 40 / 255),
+            itemSubtitleText: Color(red: 130 / 255, green: 110 / 255, blue: 90 / 255),
+            selectedItemBackground: Color(red: 140 / 255, green: 100 / 255, blue: 60 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 240 / 255, green: 220 / 255, blue: 200 / 255),
+            highlightBackground: Color.orange.opacity(0.4),
+            actionMenuHeaderBackground: Color(red: 235 / 255, green: 225 / 255, blue: 210 / 255),
+            actionMenuHeaderText: Color(red: 100 / 255, green: 80 / 255, blue: 60 / 255),
+            destructiveAction: Color(red: 180 / 255, green: 60 / 255, blue: 60 / 255),
+            editorBackground: Color(red: 252 / 255, green: 248 / 255, blue: 242 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 140 / 255, green: 100 / 255, blue: 60 / 255),
+            successColor: Color(red: 80 / 255, green: 140 / 255, blue: 80 / 255),
+            errorColor: Color(red: 180 / 255, green: 60 / 255, blue: 60 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Royal Gold
+    static let royalGold = AppTheme(
+        id: "royalGold",
+        name: "Royal Gold",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 250 / 255, green: 245 / 255, blue: 230 / 255),
+            searchFieldBackground: Color(red: 255 / 255, green: 252 / 255, blue: 245 / 255),
+            searchFieldBorder: Color(red: 200 / 255, green: 170 / 255, blue: 100 / 255).opacity(0.4),
+            launcherBorder: Color(red: 180 / 255, green: 150 / 255, blue: 80 / 255).opacity(0.5),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 150 / 255, green: 130 / 255, blue: 100 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 100 / 255, green: 80 / 255, blue: 40 / 255),
+            itemSubtitleText: Color(red: 150 / 255, green: 130 / 255, blue: 90 / 255),
+            selectedItemBackground: Color(red: 180 / 255, green: 140 / 255, blue: 50 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 255 / 255, green: 240 / 255, blue: 210 / 255),
+            highlightBackground: Color.yellow.opacity(0.5),
+            actionMenuHeaderBackground: Color(red: 240 / 255, green: 235 / 255, blue: 220 / 255),
+            actionMenuHeaderText: Color(red: 120 / 255, green: 100 / 255, blue: 60 / 255),
+            destructiveAction: Color(red: 180 / 255, green: 60 / 255, blue: 60 / 255),
+            editorBackground: Color(red: 255 / 255, green: 252 / 255, blue: 245 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 180 / 255, green: 140 / 255, blue: 50 / 255),
+            successColor: Color(red: 80 / 255, green: 150 / 255, blue: 80 / 255),
+            errorColor: Color(red: 180 / 255, green: 60 / 255, blue: 60 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Neon Cyberpunk
+    static let neonCyberpunk = AppTheme(
+        id: "neonCyberpunk",
+        name: "Neon Cyberpunk",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 10 / 255, green: 10 / 255, blue: 20 / 255),
+            searchFieldBackground: Color(red: 20 / 255, green: 20 / 255, blue: 35 / 255),
+            searchFieldBorder: Color(red: 255 / 255, green: 0 / 255, blue: 255 / 255).opacity(0.6),
+            launcherBorder: Color(red: 0 / 255, green: 255 / 255, blue: 255 / 255).opacity(0.5),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 150 / 255, green: 150 / 255, blue: 180 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 255 / 255, green: 255 / 255, blue: 200 / 255),
+            itemSubtitleText: Color(red: 180 / 255, green: 180 / 255, blue: 200 / 255),
+            selectedItemBackground: Color(red: 255 / 255, green: 0 / 255, blue: 255 / 255),
+            selectedItemTitleText: Color.black,
+            selectedItemSubtitleText: Color(red: 60 / 255, green: 0 / 255, blue: 60 / 255),
+            highlightBackground: Color(red: 0 / 255, green: 255 / 255, blue: 255 / 255).opacity(0.4),
+            actionMenuHeaderBackground: Color(red: 20 / 255, green: 20 / 255, blue: 35 / 255),
+            actionMenuHeaderText: Color(red: 0 / 255, green: 255 / 255, blue: 255 / 255),
+            destructiveAction: Color(red: 255 / 255, green: 50 / 255, blue: 50 / 255),
+            editorBackground: Color(red: 15 / 255, green: 15 / 255, blue: 25 / 255),
+            editorTextBackground: Color(red: 30 / 255, green: 30 / 255, blue: 45 / 255),
+            accentColor: Color(red: 0 / 255, green: 255 / 255, blue: 255 / 255),
+            successColor: Color(red: 0 / 255, green: 255 / 255, blue: 100 / 255),
+            errorColor: Color(red: 255 / 255, green: 50 / 255, blue: 100 / 255)
+        ),
+        isCustom: false
+    )
+    
+    // MARK: Lavender Dream
+    static let lavenderDream = AppTheme(
+        id: "lavenderDream",
+        name: "Lavender Dream",
+        colors: ThemeColors(
+            launcherBackground: Color(red: 240 / 255, green: 235 / 255, blue: 250 / 255),
+            searchFieldBackground: Color(red: 248 / 255, green: 245 / 255, blue: 252 / 255),
+            searchFieldBorder: Color(red: 160 / 255, green: 140 / 255, blue: 200 / 255).opacity(0.4),
+            launcherBorder: Color(red: 140 / 255, green: 120 / 255, blue: 180 / 255).opacity(0.5),
+            resultsBackground: Color.clear,
+            placeholderText: Color(red: 130 / 255, green: 120 / 255, blue: 150 / 255),
+            itemBackground: Color.clear,
+            itemTitleText: Color(red: 70 / 255, green: 50 / 255, blue: 100 / 255),
+            itemSubtitleText: Color(red: 120 / 255, green: 100 / 255, blue: 150 / 255),
+            selectedItemBackground: Color(red: 140 / 255, green: 100 / 255, blue: 200 / 255),
+            selectedItemTitleText: Color.white,
+            selectedItemSubtitleText: Color(red: 230 / 255, green: 215 / 255, blue: 250 / 255),
+            highlightBackground: Color.pink.opacity(0.4),
+            actionMenuHeaderBackground: Color(red: 230 / 255, green: 225 / 255, blue: 240 / 255),
+            actionMenuHeaderText: Color(red: 90 / 255, green: 70 / 255, blue: 120 / 255),
+            destructiveAction: Color(red: 200 / 255, green: 70 / 255, blue: 90 / 255),
+            editorBackground: Color(red: 248 / 255, green: 245 / 255, blue: 252 / 255),
+            editorTextBackground: Color.white,
+            accentColor: Color(red: 140 / 255, green: 100 / 255, blue: 200 / 255),
+            successColor: Color(red: 90 / 255, green: 170 / 255, blue: 100 / 255),
+            errorColor: Color(red: 200 / 255, green: 70 / 255, blue: 90 / 255)
+        ),
+        isCustom: false
+    )
+    
     static let custom = AppTheme(
         id: "custom",
         name: "Custom",
@@ -373,7 +703,7 @@ extension AppTheme {
         isCustom: true
     )
     
-    static let allThemes: [AppTheme] = [.default, .dark, .midnightBlue, .forestGreen, .warmAmber, .highContrast, .custom]
+    static let allThemes: [AppTheme] = [.default, .dark, .midnightBlue, .forestGreen, .warmAmber, .oceanBlue, .cherryBlossom, .sunsetOrange, .slateGray, .mintGreen, .coralReef, .deepSpace, .coffeeCream, .royalGold, .neonCyberpunk, .lavenderDream, .highContrast, .custom]
 }
 
 // MARK: - Theme Manager
@@ -382,11 +712,26 @@ final class ThemeManager: ObservableObject {
     static let shared = ThemeManager()
     static let themeChangedNotification = Notification.Name("ThemeManager.themeChanged")
     static let customColorsKey = "customThemeColors"
+    static let fontSizesKey = "customFontSizes"
     
     private let selectedThemeKey = "selectedThemeId"
     
     @Published var currentTheme: AppTheme
     @Published var customColors: ThemeColors
+    
+    // Font sizes
+    @Published var searchFieldFontSize: CGFloat {
+        didSet { saveFontSizes() }
+    }
+    @Published var itemTitleFontSize: CGFloat {
+        didSet { saveFontSizes() }
+    }
+    @Published var itemSubtitleFontSize: CGFloat {
+        didSet { saveFontSizes() }
+    }
+    @Published var editorFontSize: CGFloat {
+        didSet { saveFontSizes() }
+    }
     
     var colors: ThemeColors {
         currentTheme.isCustom ? customColors : currentTheme.colors
@@ -436,6 +781,13 @@ final class ThemeManager: ObservableObject {
         // Initialize stored properties
         currentTheme = loadedTheme
         customColors = loadedColors
+        
+        // Load font sizes
+        let fontSizes = UserDefaults.standard.dictionary(forKey: ThemeManager.fontSizesKey) as? [String: CGFloat]
+        searchFieldFontSize = fontSizes?["searchField"] ?? 30
+        itemTitleFontSize = fontSizes?["itemTitle"] ?? 20
+        itemSubtitleFontSize = fontSizes?["itemSubtitle"] ?? 12
+        editorFontSize = fontSizes?["editor"] ?? 15
     }
     
     func updateCustomColors(_ newColors: ThemeColors) {
@@ -506,6 +858,32 @@ final class ThemeManager: ObservableObject {
         } catch {
             print("[ThemeManager] Failed to encode custom colors: \(error)")
         }
+    }
+    
+    func saveFontSizes() {
+        let fontSizes: [String: CGFloat] = [
+            "searchField": searchFieldFontSize,
+            "itemTitle": itemTitleFontSize,
+            "itemSubtitle": itemSubtitleFontSize,
+            "editor": editorFontSize
+        ]
+        UserDefaults.standard.set(fontSizes, forKey: ThemeManager.fontSizesKey)
+        UserDefaults.standard.synchronize()
+    }
+    
+    func resetFontSizes() {
+        searchFieldFontSize = 30
+        itemTitleFontSize = 20
+        itemSubtitleFontSize = 12
+        editorFontSize = 15
+    }
+    
+    func increaseEditorFontSize() {
+        editorFontSize = min(editorFontSize + 1, 24)
+    }
+    
+    func decreaseEditorFontSize() {
+        editorFontSize = max(editorFontSize - 1, 12)
     }
 }
 

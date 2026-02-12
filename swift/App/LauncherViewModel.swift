@@ -39,7 +39,6 @@ final class LauncherViewModel: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var isEditorPresented: Bool = false
     @Published private(set) var launcherFocusRequestID: UInt64 = 0
-    @Published var isSettingsPresented: Bool = false
     @Published var settingsStorageDirectoryPath: String = ""
     @Published var settingsErrorMessage: String?
     @Published var settingsSuccessMessage: String?
@@ -80,12 +79,11 @@ final class LauncherViewModel: ObservableObject {
         editorWindow?.makeKeyAndOrderFront(nil)
     }
 
-    func presentSettings() {
+    func prepareSettings() {
         settingsErrorMessage = nil
         settingsSuccessMessage = nil
         loadSettingsStorageDirectoryPath()
         revealLauncherIfNeeded()
-        isSettingsPresented = true
     }
 
     func loadSettingsStorageDirectoryPath() {

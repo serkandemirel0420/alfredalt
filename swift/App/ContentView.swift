@@ -141,10 +141,6 @@ struct ContentView: View {
         .task {
             await viewModel.initialLoad()
         }
-        .sheet(isPresented: $viewModel.isSettingsPresented) {
-            SettingsSheet(viewModel: viewModel)
-                .environmentObject(themeManager)
-        }
     }
     
     private var searchFieldBinding: Binding<String> {
@@ -169,7 +165,7 @@ struct ContentView: View {
         return HStack {
             TextField(searchFieldPlaceholder, text: searchFieldBinding)
                 .textFieldStyle(.plain)
-                .font(.system(size: 30, weight: .regular))
+                .font(.system(size: themeManager.searchFieldFontSize, weight: .regular))
                 .foregroundStyle(colors.itemTitleText)
                 .focused($searchFieldFocused)
                 .onSubmit(handleSearchSubmit)
@@ -490,10 +486,6 @@ struct EditorWindowView: View {
         .onDisappear {
             viewModel.editorDidClose()
         }
-        .sheet(isPresented: $viewModel.isSettingsPresented) {
-            SettingsSheet(viewModel: viewModel)
-                .environmentObject(themeManager)
-        }
     }
 }
 
@@ -570,393 +562,6 @@ private struct WindowDragHandle: NSViewRepresentable {
     }
 }
 
-private struct SettingsSheet: View {
-    @ObservedObject var viewModel: LauncherViewModel
-    @EnvironmentObject private var updateChecker: UpdateChecker
-    @EnvironmentObject private var themeManager: ThemeManager
-    @Environment(\.dismiss) private var dismiss
-    @FocusState private var pathFieldFocused: Bool
-    @State private var selectedTab: SettingsTab = .general
-    
-    enum SettingsTab: String, CaseIterable, Identifiable {
-        case general = "General"
-        case appearance = "Appearance"
-        
-        var id: String { rawValue }
-        
-        var icon: String {
-            switch self {
-            case .general: return "gear"
-            case .appearance: return "paintbrush"
-            }
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Header
-            HStack {
-                Text("Settings")
-                    .font(.system(size: 20, weight: .semibold))
-                Spacer()
-                Button("Close") {
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-            }
-            .padding([.horizontal, .top], 18)
-            .padding(.bottom, 12)
-            
-            // Tab picker
-            HStack(spacing: 0) {
-                ForEach(SettingsTab.allCases) { tab in
-                    TabButton(
-                        tab: tab,
-                        isSelected: selectedTab == tab,
-                        action: { selectedTab = tab }
-                    )
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 18)
-            .padding(.bottom, 12)
-            
-            Divider()
-            
-            // Tab content
-            Group {
-                switch selectedTab {
-                case .general:
-                    generalTab
-                case .appearance:
-                    appearanceTab
-                }
-            }
-            .padding(18)
-        }
-        .frame(minWidth: 800, minHeight: 550)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear {
-            viewModel.loadSettingsStorageDirectoryPath()
-            pathFieldFocused = true
-        }
-        .onChange(of: viewModel.settingsStorageDirectoryPath) { _, _ in
-            if viewModel.settingsSuccessMessage != nil {
-                viewModel.settingsSuccessMessage = nil
-            }
-        }
-    }
-    
-    private var generalTab: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("JSON Storage Folder")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-
-                TextField("Folder path", text: $viewModel.settingsStorageDirectoryPath)
-                    .font(.system(size: 13, design: .monospaced))
-                    .textFieldStyle(.roundedBorder)
-                    .focused($pathFieldFocused)
-            }
-
-            if let settingsErrorMessage = viewModel.settingsErrorMessage {
-                Text(settingsErrorMessage)
-                    .font(.system(size: 12))
-                    .foregroundStyle(themeManager.colors.errorColor)
-            }
-
-            if let settingsSuccessMessage = viewModel.settingsSuccessMessage {
-                Text(settingsSuccessMessage)
-                    .font(.system(size: 12))
-                    .foregroundStyle(themeManager.colors.successColor)
-            }
-
-            HStack {
-                Button("Browse...") {
-                    chooseStorageFolder()
-                }
-
-                Button("Open in Finder") {
-                    openStorageFolder()
-                }
-
-                Spacer()
-
-                Button("Save") {
-                    _ = viewModel.saveSettingsStorageDirectoryPath()
-                }
-                .keyboardShortcut("s", modifiers: .command)
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Version")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text(updateChecker.currentVersion)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-
-                if updateChecker.updateAvailable, let latest = updateChecker.latestVersion {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .foregroundStyle(themeManager.colors.accentColor)
-                        Text("Update available: v\(latest)")
-                            .font(.system(size: 13, weight: .medium))
-                        Spacer()
-                        if let url = updateChecker.downloadURL {
-                            Button("Download") {
-                                NSWorkspace.shared.open(url)
-                            }
-                        }
-                    }
-                    .padding(10)
-                    .background(themeManager.colors.accentColor.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                } else {
-                    HStack(spacing: 8) {
-                        if updateChecker.isChecking {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Checking for updates...")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text("Up to date")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button("Check for Updates") {
-                                updateChecker.checkForUpdate()
-                            }
-                        }
-                    }
-                }
-            }
-            
-            Spacer()
-        }
-    }
-    
-    private var appearanceTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Theme")
-                    .font(.system(size: 14, weight: .medium))
-                
-                Text("Choose a color theme for the app. The theme will be applied immediately.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                
-                LazyVGrid(columns: [
-                    GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 16)
-                ], spacing: 16) {
-                    ForEach(AppTheme.allThemes) { theme in
-                        ThemeCard(
-                            theme: theme,
-                            isSelected: themeManager.currentTheme.id == theme.id
-                        ) {
-                            themeManager.setTheme(theme)
-                        }
-                    }
-                }
-                
-                // Show color pickers for custom theme
-                if themeManager.currentTheme.isCustom {
-                    Divider()
-                        .padding(.vertical, 8)
-                    
-                    customColorsSection
-                }
-                
-                Spacer(minLength: 20)
-            }
-            .padding(.bottom, 10)
-        }
-    }
-    
-    private var customColorsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Custom Colors")
-                .font(.system(size: 14, weight: .medium))
-            
-            Text("Customize the colors for your theme.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            
-            VStack(spacing: 12) {
-                ColorPickerRow(
-                    label: "Outer Background",
-                    color: Binding(
-                        get: { themeManager.customColors.launcherBackground },
-                        set: { themeManager.updateCustomColor($0, for: \.launcherBackground) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Search Bar Background",
-                    color: Binding(
-                        get: { themeManager.customColors.searchFieldBackground },
-                        set: { themeManager.updateCustomColor($0, for: \.searchFieldBackground) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Search Bar Border",
-                    color: Binding(
-                        get: { themeManager.customColors.searchFieldBorder },
-                        set: { themeManager.updateCustomColor($0, for: \.searchFieldBorder) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Outer Border",
-                    color: Binding(
-                        get: { themeManager.customColors.launcherBorder },
-                        set: { themeManager.updateCustomColor($0, for: \.launcherBorder) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Item Background",
-                    color: Binding(
-                        get: { themeManager.customColors.itemBackground },
-                        set: { themeManager.updateCustomColor($0, for: \.itemBackground) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Item Title",
-                    color: Binding(
-                        get: { themeManager.customColors.itemTitleText },
-                        set: { themeManager.updateCustomColor($0, for: \.itemTitleText) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Item Subtitle",
-                    color: Binding(
-                        get: { themeManager.customColors.itemSubtitleText },
-                        set: { themeManager.updateCustomColor($0, for: \.itemSubtitleText) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Selected Item Background",
-                    color: Binding(
-                        get: { themeManager.customColors.selectedItemBackground },
-                        set: { themeManager.updateCustomColor($0, for: \.selectedItemBackground) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Selected Item Title",
-                    color: Binding(
-                        get: { themeManager.customColors.selectedItemTitleText },
-                        set: { themeManager.updateCustomColor($0, for: \.selectedItemTitleText) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Selected Item Subtitle",
-                    color: Binding(
-                        get: { themeManager.customColors.selectedItemSubtitleText },
-                        set: { themeManager.updateCustomColor($0, for: \.selectedItemSubtitleText) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Accent Color",
-                    color: Binding(
-                        get: { themeManager.customColors.accentColor },
-                        set: { themeManager.updateCustomColor($0, for: \.accentColor) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Editor Background",
-                    color: Binding(
-                        get: { themeManager.customColors.editorBackground },
-                        set: { themeManager.updateCustomColor($0, for: \.editorBackground) }
-                    )
-                )
-                
-                ColorPickerRow(
-                    label: "Editor Text Area",
-                    color: Binding(
-                        get: { themeManager.customColors.editorTextBackground },
-                        set: { themeManager.updateCustomColor($0, for: \.editorTextBackground) }
-                    )
-                )
-                
-
-                
-                ColorPickerRow(
-                    label: "Highlight Background",
-                    color: Binding(
-                        get: { themeManager.customColors.highlightBackground },
-                        set: { themeManager.updateCustomColor($0, for: \.highlightBackground) }
-                    )
-                )
-            }
-            
-            HStack {
-                Spacer()
-                Button("Reset to Defaults") {
-                    themeManager.customColors = AppTheme.defaultCustomColors
-                }
-                .font(.system(size: 12))
-            }
-            .padding(.top, 8)
-        }
-    }
-
-
-    private func openStorageFolder() {
-        let path = viewModel.settingsStorageDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty else {
-            return
-        }
-        let expandedPath = (path as NSString).expandingTildeInPath
-
-        let folderURL = URL(fileURLWithPath: expandedPath, isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-        } catch {
-            return
-        }
-        NSWorkspace.shared.open(folderURL)
-    }
-
-    private func chooseStorageFolder() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose JSON Storage Folder"
-        panel.message = "JSON files will be written here, with images in an images folder."
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-
-        let currentPath = viewModel.settingsStorageDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !currentPath.isEmpty {
-            panel.directoryURL = URL(
-                fileURLWithPath: (currentPath as NSString).expandingTildeInPath,
-                isDirectory: true
-            )
-        }
-
-        if panel.runModal() == .OK, let selectedURL = panel.url {
-            viewModel.settingsStorageDirectoryPath = selectedURL.path
-            viewModel.settingsErrorMessage = nil
-            viewModel.settingsSuccessMessage = nil
-        }
-    }
-}
 
 private struct ResultRow: View, Equatable {
     private struct SnippetSegment {
@@ -980,7 +585,7 @@ private struct ResultRow: View, Equatable {
         Button(action: onActivate) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(item.title)
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: themeManager.itemTitleFontSize, weight: .semibold))
                     .foregroundStyle(isSelected ? themeManager.colors.selectedItemTitleText : themeManager.colors.itemTitleText)
 
                 if let snippetSegments = visibleSnippetSegments {
@@ -1021,7 +626,7 @@ private struct ResultRow: View, Equatable {
         var attributed = AttributedString()
         for segment in segments {
             var part = AttributedString(segment.text)
-            part.font = .system(size: 12, weight: .regular)
+            part.font = .system(size: themeManager.itemSubtitleFontSize, weight: .regular)
             
             // Use different colors based on selection state
             if segment.isHighlighted {
@@ -1156,7 +761,7 @@ private struct ResultsListItems: View {
 }
 
 private struct TabButton: View {
-    let tab: SettingsSheet.SettingsTab
+    let tab: SettingsWindowView.SettingsTab
     let isSelected: Bool
     let action: () -> Void
     
@@ -1195,6 +800,676 @@ private struct ColorPickerRow: View {
         .padding(.vertical, 8)
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct FontSizeRow: View {
+    let label: String
+    @Binding var value: CGFloat
+    let range: ClosedRange<CGFloat>
+    let defaultValue: CGFloat
+    
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 13))
+            
+            Spacer()
+            
+            Text("\(Int(value))pt")
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 45, alignment: .trailing)
+            
+            Stepper("", value: $value, in: range, step: 1)
+                .labelsHidden()
+                .frame(width: 80)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+// MARK: - Settings Window View
+
+struct SettingsWindowView: View {
+    @EnvironmentObject var viewModel: LauncherViewModel
+    @EnvironmentObject var updateChecker: UpdateChecker
+    @EnvironmentObject var themeManager: ThemeManager
+    @StateObject private var hotKeyManager = HotKeyManager.shared
+    @FocusState private var pathFieldFocused: Bool
+    @State private var selectedTab: SettingsTab = .general
+    
+    enum SettingsTab: String, CaseIterable, Identifiable {
+        case general = "General"
+        case appearance = "Appearance"
+        case hotkeys = "Hotkeys"
+        
+        var id: String { rawValue }
+        
+        var icon: String {
+            switch self {
+            case .general: return "gear"
+            case .appearance: return "paintbrush"
+            case .hotkeys: return "keyboard"
+            }
+        }
+    }
+    
+    @Environment(\.dismissWindow) private var dismissWindow
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Title bar area for dragging and focus
+            HStack {
+                Spacer()
+            }
+            .frame(height: 28)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .overlay(
+                WindowDragHandle(inset: 0)
+            )
+            
+            // Tab picker
+            HStack(spacing: 0) {
+                ForEach(SettingsTab.allCases) { tab in
+                    TabButton(
+                        tab: tab,
+                        isSelected: selectedTab == tab,
+                        action: { selectedTab = tab }
+                    )
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            
+            Divider()
+            
+            // Tab content
+            Group {
+                switch selectedTab {
+                case .general:
+                    generalTab
+                case .appearance:
+                    appearanceTab
+                case .hotkeys:
+                    hotkeysTab
+                }
+            }
+            .padding(18)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .onAppear {
+            viewModel.loadSettingsStorageDirectoryPath()
+        }
+        .onChange(of: viewModel.settingsStorageDirectoryPath) { _, _ in
+            if viewModel.settingsSuccessMessage != nil {
+                viewModel.settingsSuccessMessage = nil
+            }
+        }
+        // Handle ESC key to close settings window
+        .background(
+            SettingsKeyEventMonitor {
+                dismissWindow(id: "settings")
+            }
+        )
+    }
+    
+    private var generalTab: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("JSON Storage Folder")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                
+                TextField("Folder path", text: $viewModel.settingsStorageDirectoryPath)
+                    .font(.system(size: 13, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($pathFieldFocused)
+            }
+            
+            if let settingsErrorMessage = viewModel.settingsErrorMessage {
+                Text(settingsErrorMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(themeManager.colors.errorColor)
+            }
+            
+            if let settingsSuccessMessage = viewModel.settingsSuccessMessage {
+                Text(settingsSuccessMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(themeManager.colors.successColor)
+            }
+            
+            HStack {
+                Button("Browse...") {
+                    chooseStorageFolder()
+                }
+                
+                Button("Open in Finder") {
+                    openStorageFolder()
+                }
+                
+                Spacer()
+                
+                Button("Save") {
+                    _ = viewModel.saveSettingsStorageDirectoryPath()
+                }
+                .keyboardShortcut("s", modifiers: .command)
+            }
+            
+            Divider()
+            
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Version")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(updateChecker.currentVersion)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+                
+                if updateChecker.updateAvailable, let latest = updateChecker.latestVersion {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .foregroundStyle(themeManager.colors.accentColor)
+                        Text("Update available: v\(latest)")
+                            .font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        if let url = updateChecker.downloadURL {
+                            Button("Download") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .background(themeManager.colors.accentColor.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                } else {
+                    HStack(spacing: 8) {
+                        if updateChecker.isChecking {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Checking for updates...")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("Up to date")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Check for Updates") {
+                                updateChecker.checkForUpdate()
+                            }
+                        }
+                    }
+                }
+            }
+            
+            
+            Divider()
+            
+            // Font Sizes Section
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Font Sizes")
+                    .font(.system(size: 14, weight: .medium))
+                
+                FontSizeRow(
+                    label: "Search Field",
+                    value: $themeManager.searchFieldFontSize,
+                    range: 20...40,
+                    defaultValue: 30
+                )
+                
+                FontSizeRow(
+                    label: "Item Title",
+                    value: $themeManager.itemTitleFontSize,
+                    range: 14...28,
+                    defaultValue: 20
+                )
+                
+                FontSizeRow(
+                    label: "Item Subtitle",
+                    value: $themeManager.itemSubtitleFontSize,
+                    range: 10...18,
+                    defaultValue: 12
+                )
+                
+                FontSizeRow(
+                    label: "Editor",
+                    value: $themeManager.editorFontSize,
+                    range: 12...24,
+                    defaultValue: 15
+                )
+                
+                HStack {
+                    Spacer()
+                    Button("Reset to Defaults") {
+                        themeManager.resetFontSizes()
+                    }
+                    .font(.system(size: 12))
+                }
+            }
+            
+            Spacer()
+        }
+    }
+    
+    private var appearanceTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Theme")
+                    .font(.system(size: 14, weight: .medium))
+                
+                Text("Choose a base theme. You can customize any theme's colors below.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                
+                LazyVGrid(columns: [
+                    GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 16)
+                ], spacing: 16) {
+                    // Predefined themes
+                    ForEach(AppTheme.allThemes.filter { !$0.isCustom }) { theme in
+                        ThemeCard(
+                            theme: theme,
+                            isSelected: themeManager.currentTheme.id == theme.id && !themeManager.currentTheme.isCustom
+                        ) {
+                            // Copy the theme's colors to custom colors and switch to custom
+                            themeManager.customColors = theme.colors
+                            themeManager.setTheme(.custom)
+                        }
+                    }
+                    
+                    // Custom theme card (shows current custom colors)
+                    ThemeCard(
+                        theme: .custom,
+                        isSelected: themeManager.currentTheme.isCustom
+                    ) {
+                        // Just ensure we're on custom theme (colors already shown)
+                        themeManager.setTheme(.custom)
+                    }
+                }
+                
+                Divider()
+                    .padding(.vertical, 8)
+                
+                customColorsSection
+                
+                Spacer(minLength: 20)
+            }
+            .padding(.bottom, 10)
+        }
+    }
+    
+    private var customColorsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Customize Colors")
+                .font(.system(size: 14, weight: .medium))
+            
+            Text("Currently customizing: \(themeManager.currentTheme.isCustom ? "Custom Theme" : themeManager.currentTheme.name)")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            
+            VStack(spacing: 12) {
+                ColorPickerRow(
+                    label: "Outer Background",
+                    color: Binding(
+                        get: { themeManager.customColors.launcherBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.launcherBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Search Bar Background",
+                    color: Binding(
+                        get: { themeManager.customColors.searchFieldBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.searchFieldBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Search Bar Border",
+                    color: Binding(
+                        get: { themeManager.customColors.searchFieldBorder },
+                        set: { themeManager.updateCustomColor($0, for: \.searchFieldBorder) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Outer Border",
+                    color: Binding(
+                        get: { themeManager.customColors.launcherBorder },
+                        set: { themeManager.updateCustomColor($0, for: \.launcherBorder) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Item Background",
+                    color: Binding(
+                        get: { themeManager.customColors.itemBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.itemBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Item Title",
+                    color: Binding(
+                        get: { themeManager.customColors.itemTitleText },
+                        set: { themeManager.updateCustomColor($0, for: \.itemTitleText) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Item Subtitle",
+                    color: Binding(
+                        get: { themeManager.customColors.itemSubtitleText },
+                        set: { themeManager.updateCustomColor($0, for: \.itemSubtitleText) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Selected Item Background",
+                    color: Binding(
+                        get: { themeManager.customColors.selectedItemBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.selectedItemBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Selected Item Title",
+                    color: Binding(
+                        get: { themeManager.customColors.selectedItemTitleText },
+                        set: { themeManager.updateCustomColor($0, for: \.selectedItemTitleText) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Selected Item Subtitle",
+                    color: Binding(
+                        get: { themeManager.customColors.selectedItemSubtitleText },
+                        set: { themeManager.updateCustomColor($0, for: \.selectedItemSubtitleText) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Accent Color",
+                    color: Binding(
+                        get: { themeManager.customColors.accentColor },
+                        set: { themeManager.updateCustomColor($0, for: \.accentColor) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Editor Background",
+                    color: Binding(
+                        get: { themeManager.customColors.editorBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.editorBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Editor Text Area",
+                    color: Binding(
+                        get: { themeManager.customColors.editorTextBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.editorTextBackground) }
+                    )
+                )
+                
+                ColorPickerRow(
+                    label: "Highlight Background",
+                    color: Binding(
+                        get: { themeManager.customColors.highlightBackground },
+                        set: { themeManager.updateCustomColor($0, for: \.highlightBackground) }
+                    )
+                )
+            }
+            
+            HStack {
+                Spacer()
+                Button("Reset to Defaults") {
+                    themeManager.customColors = AppTheme.defaultCustomColors
+                }
+                .font(.system(size: 12))
+            }
+            .padding(.top, 8)
+        }
+    }
+    
+    private var hotkeysTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                // Launcher Hotkey Section
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Launcher Hotkey")
+                        .font(.system(size: 14, weight: .medium))
+                    
+                    Text("Choose how to show or hide the launcher.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    
+                    VStack(spacing: 12) {
+                        // Double Option
+                        HotkeyOptionRow(
+                            title: "Double-Tap Option",
+                            subtitle: "Press the Option (⌥) key twice quickly",
+                            isSelected: hotKeyManager.currentHotKey == .doubleOption,
+                            icon: "option"
+                        ) {
+                            hotKeyManager.setHotKey(.doubleOption)
+                        }
+                        
+                        // Command + Space
+                        HotkeyOptionRow(
+                            title: "Command + Space",
+                            subtitle: "Classic Spotlight-style shortcut",
+                            isSelected: hotKeyManager.currentHotKey == .commandSpace,
+                            icon: "command"
+                        ) {
+                            hotKeyManager.setHotKey(.commandSpace)
+                        }
+                        
+                        // Option + Space
+                        HotkeyOptionRow(
+                            title: "Option + Space",
+                            subtitle: "Alternative modifier shortcut",
+                            isSelected: hotKeyManager.currentHotKey == .optionSpace,
+                            icon: "option2"
+                        ) {
+                            hotKeyManager.setHotKey(.optionSpace)
+                        }
+                        
+                        // Control + Space
+                        HotkeyOptionRow(
+                            title: "Control + Space",
+                            subtitle: "Ctrl+Space combination",
+                            isSelected: hotKeyManager.currentHotKey == .controlSpace,
+                            icon: "control"
+                        ) {
+                            hotKeyManager.setHotKey(.controlSpace)
+                        }
+                        
+                        // Shift + Space
+                        HotkeyOptionRow(
+                            title: "Shift + Space",
+                            subtitle: "Shift+Space combination",
+                            isSelected: hotKeyManager.currentHotKey == .shiftSpace,
+                            icon: "shift"
+                        ) {
+                            hotKeyManager.setHotKey(.shiftSpace)
+                        }
+                    }
+                }
+                
+                Divider()
+                    .padding(.vertical, 8)
+                
+                // Tips Section
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Tips")
+                        .font(.system(size: 14, weight: .medium))
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(themeManager.colors.accentColor)
+                            Text("Double-tap hotkeys may occasionally conflict with system shortcuts")
+                                .font(.system(size: 12))
+                        }
+                        
+                        HStack(spacing: 8) {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundStyle(themeManager.colors.accentColor)
+                            Text("Changes take effect immediately")
+                                .font(.system(size: 12))
+                        }
+                    }
+                }
+                
+                Spacer(minLength: 20)
+            }
+            .padding(.bottom, 10)
+        }
+    }
+    
+    private struct HotkeyOptionRow: View {
+        let title: String
+        let subtitle: String
+        let isSelected: Bool
+        let icon: String
+        let action: () -> Void
+        @EnvironmentObject var themeManager: ThemeManager
+        
+        var iconText: String {
+            switch icon {
+            case "option": return "⌥"
+            case "option2": return "⌥"
+            case "command": return "⌘"
+            case "control": return "⌃"
+            case "shift": return "⇧"
+            default: return "⌘"
+            }
+        }
+        
+        var body: some View {
+            Button(action: action) {
+                HStack(spacing: 12) {
+                    // Icon
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(isSelected ? themeManager.colors.accentColor.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
+                            .frame(width: 44, height: 44)
+                        
+                        Text(iconText)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(isSelected ? themeManager.colors.accentColor : .primary)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(title)
+                            .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
+                            .foregroundStyle(isSelected ? themeManager.colors.accentColor : .primary)
+                        
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(themeManager.colors.accentColor)
+                            .font(.system(size: 20))
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(isSelected ? themeManager.colors.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(isSelected ? themeManager.colors.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+        }
+    }
+    
+    private func openStorageFolder() {
+        let path = viewModel.settingsStorageDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty else { return }
+        let expandedPath = (path as NSString).expandingTildeInPath
+        
+        let folderURL = URL(fileURLWithPath: expandedPath, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+        } catch { return }
+        NSWorkspace.shared.open(folderURL)
+    }
+    
+    private func chooseStorageFolder() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose JSON Storage Folder"
+        panel.message = "JSON files will be written here, with images in an images folder."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        
+        let currentPath = viewModel.settingsStorageDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !currentPath.isEmpty {
+            panel.directoryURL = URL(
+                fileURLWithPath: (currentPath as NSString).expandingTildeInPath,
+                isDirectory: true
+            )
+        }
+        
+        if panel.runModal() == .OK, let selectedURL = panel.url {
+            viewModel.settingsStorageDirectoryPath = selectedURL.path
+            viewModel.settingsErrorMessage = nil
+            viewModel.settingsSuccessMessage = nil
+        }
+    }
+}
+
+// MARK: - Settings Key Event Monitor
+
+private struct SettingsKeyEventMonitor: NSViewRepresentable {
+    let onEscape: () -> Void
+    
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        
+        // Add local monitor for key events
+        context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.keyCode == 53 { // ESC key
+                onEscape()
+                return nil // Consume the event
+            }
+            return event
+        }
+        
+        return view
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+    
+    class Coordinator {
+        var monitor: Any?
+        
+        deinit {
+            if let monitor = monitor {
+                NSEvent.removeMonitor(monitor)
+            }
+        }
     }
 }
 
@@ -1302,7 +1577,7 @@ private struct EditorSheet: View {
                 imagesByKey: Dictionary(uniqueKeysWithValues: (viewModel.selectedItem?.images ?? []).map { ($0.imageKey, $0.bytes) }),
                 searchQuery: viewModel.query,
                 defaultImageWidth: 360,
-                fontSize: viewModel.editorFontSize
+                fontSize: themeManager.editorFontSize
             ) { cursorIndex in
                 editorCursorCharIndex = cursorIndex
             }
@@ -1369,10 +1644,10 @@ private struct EditorSheet: View {
 
         switch event.keyCode {
         case 24, 69: // =/+ and keypad +
-            viewModel.increaseEditorFontSize()
+            themeManager.increaseEditorFontSize()
             return true
         case 27, 78: // - and keypad -
-            viewModel.decreaseEditorFontSize()
+            themeManager.decreaseEditorFontSize()
             return true
         default:
             break
@@ -1384,10 +1659,10 @@ private struct EditorSheet: View {
 
         switch chars {
         case "=", "+":
-            viewModel.increaseEditorFontSize()
+            themeManager.increaseEditorFontSize()
             return true
         case "-":
-            viewModel.decreaseEditorFontSize()
+            themeManager.decreaseEditorFontSize()
             return true
         default:
             return false
