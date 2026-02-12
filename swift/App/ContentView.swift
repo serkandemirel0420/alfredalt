@@ -773,13 +773,14 @@ private struct TabButton: View {
                 Text(tab.rawValue)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(isSelected ? Color(nsColor: .selectedControlColor) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .buttonStyle(.plain)
         .foregroundStyle(isSelected ? Color(nsColor: .selectedControlTextColor) : Color.primary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(isSelected ? Color(nsColor: .selectedControlColor) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .contentShape(Rectangle())
     }
 }
 
@@ -1072,8 +1073,8 @@ struct SettingsWindowView: View {
                 LazyVGrid(columns: [
                     GridItem(.adaptive(minimum: 160, maximum: 200), spacing: 16)
                 ], spacing: 16) {
-                    // Predefined themes
-                    ForEach(AppTheme.allThemes.filter { !$0.isCustom }) { theme in
+                    // Predefined themes - use static array to avoid recomputation
+                    ForEach(predefinedThemes) { theme in
                         ThemeCard(
                             theme: theme,
                             isSelected: themeManager.currentTheme.id == theme.id && !themeManager.currentTheme.isCustom
@@ -1114,6 +1115,25 @@ struct SettingsWindowView: View {
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             
+            // Use a separate view to isolate updates
+            CustomColorPickersView(themeManager: themeManager)
+            
+            HStack {
+                Spacer()
+                Button("Reset to Defaults") {
+                    themeManager.customColors = AppTheme.defaultCustomColors
+                }
+                .font(.system(size: 12))
+            }
+            .padding(.top, 8)
+        }
+    }
+    
+    // Separate view to isolate color picker updates from the rest of settings
+    private struct CustomColorPickersView: View {
+        @ObservedObject var themeManager: ThemeManager
+        
+        var body: some View {
             VStack(spacing: 12) {
                 ColorPickerRow(
                     label: "Outer Background",
@@ -1227,15 +1247,6 @@ struct SettingsWindowView: View {
                     )
                 )
             }
-            
-            HStack {
-                Spacer()
-                Button("Reset to Defaults") {
-                    themeManager.customColors = AppTheme.defaultCustomColors
-                }
-                .font(.system(size: 12))
-            }
-            .padding(.top, 8)
         }
     }
     
@@ -1444,34 +1455,56 @@ private struct SettingsKeyEventMonitor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         
-        // Add local monitor for key events
-        context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+        // Add local monitor for key events - only for our window
+        context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak coordinator = context.coordinator] event in
+            guard let coordinator = coordinator else { return event }
+            guard let monitoredWindow = coordinator.window else { return event }
+            // Only handle events for our window
+            guard event.window === monitoredWindow else { return event }
+            
             if event.keyCode == 53 { // ESC key
-                onEscape()
+                coordinator.onEscape?()
                 return nil // Consume the event
             }
             return event
         }
         
+        // Set initial window reference
+        DispatchQueue.main.async {
+            context.coordinator.window = view.window
+            context.coordinator.onEscape = onEscape
+        }
+        
         return view
     }
     
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.window = nsView.window
+        context.coordinator.onEscape = onEscape
+    }
     
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
     
-    class Coordinator {
-        var monitor: Any?
-        
-        deinit {
-            if let monitor = monitor {
-                NSEvent.removeMonitor(monitor)
-            }
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.onEscape = nil
+        coordinator.window = nil
+        if let monitor = coordinator.monitor {
+            NSEvent.removeMonitor(monitor)
+            coordinator.monitor = nil
         }
     }
+    
+    class Coordinator {
+        var monitor: Any?
+        weak var window: NSWindow?
+        var onEscape: (() -> Void)?
+    }
 }
+
+// Predefined themes computed once
+private let predefinedThemes: [AppTheme] = AppTheme.allThemes.filter { !$0.isCustom }
 
 private struct ThemeCard: View {
     let theme: AppTheme
@@ -1479,83 +1512,113 @@ private struct ThemeCard: View {
     let action: () -> Void
     @EnvironmentObject var themeManager: ThemeManager
     
+    // Only observe custom colors for the custom theme card to reduce updates
     private var displayColors: ThemeColors {
         theme.isCustom ? themeManager.customColors : theme.colors
+    }
+    
+    // Use a stable ID for the card to prevent unnecessary re-renders
+    // Custom theme card needs to update when custom colors change
+    private var cardId: String {
+        if theme.isCustom {
+            // Use a simple string that changes when theme changes
+            return "custom-\(themeManager.currentTheme.isCustom)"
+        }
+        return theme.id
     }
     
     var body: some View {
         Button(action: action) {
             VStack(spacing: 0) {
-                // Preview area
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(displayColors.launcherBackground)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(displayColors.launcherBorder, lineWidth: 1)
-                        )
-                    
-                    VStack(spacing: 8) {
-                        // Search field preview
-                        RoundedRectangle(cornerRadius: 4, style: .continuous)
-                            .fill(displayColors.searchFieldBackground)
-                            .frame(height: 24)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                    .stroke(displayColors.searchFieldBorder, lineWidth: 0.5)
-                            )
-                        
-                        // Results preview - shows both selected and unselected items
-                        VStack(spacing: 4) {
-                            // Selected item
-                            HStack(spacing: 4) {
-                                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                    .fill(displayColors.selectedItemBackground)
-                                    .frame(width: 40, height: 18)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(displayColors.selectedItemTitleText.opacity(0.3))
-                                        .frame(width: 50, height: 6)
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(displayColors.selectedItemSubtitleText.opacity(0.2))
-                                        .frame(width: 35, height: 4)
-                                }
-                            }
-                            // Unselected item
-                            HStack(spacing: 4) {
-                                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                    .fill(displayColors.itemBackground)
-                                    .frame(width: 40, height: 18)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(displayColors.itemTitleText.opacity(0.3))
-                                        .frame(width: 45, height: 6)
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(displayColors.itemSubtitleText.opacity(0.2))
-                                        .frame(width: 30, height: 4)
-                                }
-                            }
-                        }
-                    }
-                    .padding(10)
-                }
-                .frame(height: 90)
+                // Preview area - use id to control when view updates
+                themePreview
+                    .frame(height: 90)
                 
-                // Name label
+                // Name label - only use accent color for selection state, not custom colors
                 Text(theme.name)
                     .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
-                    .foregroundStyle(isSelected ? themeManager.colors.accentColor : Color.primary)
+                    .foregroundStyle(selectionForegroundColor)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 8)
-                    .background(isSelected ? themeManager.colors.accentColor.opacity(0.1) : Color.clear)
+                    .background(selectionBackgroundColor)
             }
         }
         .buttonStyle(.plain)
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isSelected ? themeManager.colors.accentColor : Color.clear, lineWidth: 2)
+                .stroke(selectionStrokeColor, lineWidth: 2)
         )
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .id(cardId)
+    }
+    
+    // Separate computed properties to minimize re-evaluation
+    private var selectionForegroundColor: Color {
+        isSelected ? themeManager.colors.accentColor : Color.primary
+    }
+    
+    private var selectionBackgroundColor: Color {
+        isSelected ? themeManager.colors.accentColor.opacity(0.1) : Color.clear
+    }
+    
+    private var selectionStrokeColor: Color {
+        isSelected ? themeManager.colors.accentColor : Color.clear
+    }
+    
+    // Extract preview into separate view to control updates
+    private var themePreview: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(displayColors.launcherBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(displayColors.launcherBorder, lineWidth: 1)
+                )
+            
+            VStack(spacing: 8) {
+                // Search field preview
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(displayColors.searchFieldBackground)
+                    .frame(height: 24)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .stroke(displayColors.searchFieldBorder, lineWidth: 0.5)
+                    )
+                
+                // Results preview - shows both selected and unselected items
+                VStack(spacing: 4) {
+                    // Selected item
+                    HStack(spacing: 4) {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(displayColors.selectedItemBackground)
+                            .frame(width: 40, height: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(displayColors.selectedItemTitleText.opacity(0.3))
+                                .frame(width: 50, height: 6)
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(displayColors.selectedItemSubtitleText.opacity(0.2))
+                                .frame(width: 35, height: 4)
+                        }
+                    }
+                    // Unselected item
+                    HStack(spacing: 4) {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(displayColors.itemBackground)
+                            .frame(width: 40, height: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(displayColors.itemTitleText.opacity(0.3))
+                                .frame(width: 45, height: 6)
+                            RoundedRectangle(cornerRadius: 2)
+                                .fill(displayColors.itemSubtitleText.opacity(0.2))
+                                .frame(width: 30, height: 4)
+                        }
+                    }
+                }
+            }
+            .padding(10)
+        }
     }
 }
 
