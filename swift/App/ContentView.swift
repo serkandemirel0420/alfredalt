@@ -917,6 +917,7 @@ private struct FontSizeRow: View {
 struct SettingsWindowView: View {
     @EnvironmentObject var viewModel: LauncherViewModel
     @EnvironmentObject var updateChecker: UpdateChecker
+    @EnvironmentObject var autoUpdater: AutoUpdater
     @EnvironmentObject var themeManager: ThemeManager
     @StateObject private var hotKeyManager = HotKeyManager.shared
     @FocusState private var pathFieldFocused: Bool
@@ -996,6 +997,14 @@ struct SettingsWindowView: View {
                 dismissWindow(id: "settings")
             }
         )
+        .alert("Update Available", isPresented: $autoUpdater.showRestartAlert) {
+            Button("Restart Now") {
+                autoUpdater.restartApp()
+            }
+            Button("Later", role: .cancel) {}
+        } message: {
+            Text("The update has been installed. Restart the app to apply the changes.")
+        }
     }
     
     private var generalTab: some View {
@@ -1053,7 +1062,19 @@ struct SettingsWindowView: View {
                         .foregroundStyle(.secondary)
                 }
                 
-                if updateChecker.updateAvailable, let latest = updateChecker.latestVersion {
+                if autoUpdater.isUpdating {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(autoUpdater.updateProgress)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(10)
+                    .background(themeManager.colors.accentColor.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                } else if updateChecker.updateAvailable, let latest = updateChecker.latestVersion {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.up.circle.fill")
                             .foregroundStyle(themeManager.colors.accentColor)
@@ -1061,9 +1082,10 @@ struct SettingsWindowView: View {
                             .font(.system(size: 13, weight: .medium))
                         Spacer()
                         if let url = updateChecker.downloadURL {
-                            Button("Download") {
-                                NSWorkspace.shared.open(url)
+                            Button("Install Update") {
+                                autoUpdater.startAutoUpdate(downloadURL: url, version: latest)
                             }
+                            .disabled(autoUpdater.isUpdating)
                         }
                     }
                     .padding(10)

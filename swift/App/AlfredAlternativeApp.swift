@@ -38,6 +38,7 @@ struct AlfredAlternativeApp: App {
     @NSApplicationDelegateAdaptor(AlfredAlternativeAppDelegate.self) private var appDelegate
     @StateObject private var viewModel = LauncherViewModel()
     @StateObject private var updateChecker = UpdateChecker()
+    @StateObject private var autoUpdater = AutoUpdater.shared
     @StateObject private var themeManager = ThemeManager.shared
     @Environment(\.openWindow) private var openWindow
 
@@ -46,6 +47,7 @@ struct AlfredAlternativeApp: App {
             ContentView()
                 .environmentObject(viewModel)
                 .environmentObject(updateChecker)
+                .environmentObject(autoUpdater)
                 .environmentObject(themeManager)
                 .onAppear {
                     appDelegate.viewModel = viewModel
@@ -68,6 +70,7 @@ struct AlfredAlternativeApp: App {
             EditorWindowView()
                 .environmentObject(viewModel)
                 .environmentObject(updateChecker)
+                .environmentObject(autoUpdater)
                 .environmentObject(themeManager)
         }
         .windowStyle(.automatic)
@@ -77,6 +80,7 @@ struct AlfredAlternativeApp: App {
             SettingsWindowView()
                 .environmentObject(viewModel)
                 .environmentObject(updateChecker)
+                .environmentObject(autoUpdater)
                 .environmentObject(themeManager)
                 .onAppear {
                     // Bring settings window to front when opened
@@ -87,5 +91,6 @@ struct AlfredAlternativeApp: App {
         }
         .defaultSize(width: 800, height: 550)
         .defaultPosition(.center)
+        .commandsRemoved()
     }
 }

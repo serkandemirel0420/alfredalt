@@ -9,6 +9,7 @@ final class UpdateChecker: ObservableObject {
 
     private static let releasesURL = URL(string: "https://api.github.com/repos/serkandemirel0420/alfredalt/releases/latest")!
     private var hasCheckedThisSession = false
+    var autoUpdateEnabled = true  // Enable automatic updates by default
 
     var currentVersion: String {
         RustBridgeClient.version()
@@ -18,6 +19,18 @@ final class UpdateChecker: ObservableObject {
         guard !hasCheckedThisSession else { return }
         hasCheckedThisSession = true
         checkForUpdate()
+    }
+    
+    func performAutoUpdate() {
+        guard autoUpdateEnabled,
+              updateAvailable,
+              let version = latestVersion,
+              let url = downloadURL else {
+            return
+        }
+        
+        // Start automatic update in background
+        AutoUpdater.shared.startAutoUpdate(downloadURL: url, version: version)
     }
 
     func checkForUpdate() {
