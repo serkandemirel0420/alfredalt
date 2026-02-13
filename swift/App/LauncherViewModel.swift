@@ -34,7 +34,11 @@ final class LauncherViewModel: ObservableObject {
 
     @Published private(set) var results: [SearchResultRecord] = []
     @Published private(set) var selectedItem: EditableItemRecord?
-    @Published var editorText: String = ""
+    @Published var editorText: String = "" {
+        didSet {
+            editorStateRevision &+= 1
+        }
+    }
     @Published private(set) var editorFontSize: CGFloat = editorDefaultFontSize
     @Published var errorMessage: String?
     @Published private(set) var isEditorPresented: Bool = false
@@ -47,6 +51,7 @@ final class LauncherViewModel: ObservableObject {
     private var queuedSearchQuery: String?
     private var isSearchWorkerRunning = false
     private var autosaveTask: Task<Void, Never>?
+    private var editorStateRevision: UInt64 = 0
     private weak var launcherWindow: NSWindow?
     private weak var editorWindow: NSWindow?
     private weak var settingsWindow: NSWindow?
@@ -225,6 +230,7 @@ final class LauncherViewModel: ObservableObject {
             return true
         }
 
+        let saveRevision = editorStateRevision
         item.note = editorText
         let referenced = referencedImageKeys(in: editorText)
         item.images.removeAll { !referenced.contains($0.imageKey) }
@@ -245,8 +251,26 @@ final class LauncherViewModel: ObservableObject {
                     }
                 }
             }
-            selectedItem = refreshed
-            editorText = refreshed.note
+
+            // If the user switched items while this save was in-flight, don't overwrite editor state.
+            guard selectedItem?.id == itemId else {
+                errorMessage = nil
+                refreshSearchForCurrentQuery()
+                return true
+            }
+
+            if saveRevision == editorStateRevision {
+                // No local edits since save started; safe to apply canonical backend note.
+                selectedItem = refreshed
+                editorText = refreshed.note
+            } else if var current = selectedItem, current.id == refreshed.id {
+                // Preserve local in-flight edits but keep refreshed metadata/images.
+                current.title = refreshed.title
+                current.images = refreshed.images
+                current.note = editorText
+                selectedItem = current
+            }
+
             errorMessage = nil
             refreshSearchForCurrentQuery()
             return true
