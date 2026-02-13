@@ -1298,7 +1298,8 @@ fn build_field_snippet(
 
 fn sanitize_note_for_preview(note: &str) -> String {
     let without_images = strip_inline_image_refs(note);
-    let collapsed = collapse_whitespace(&without_images);
+    let without_styles = strip_inline_style_tokens(&without_images);
+    let collapsed = collapse_whitespace(&without_styles);
     strip_image_residue_tokens(&collapsed)
 }
 
@@ -1334,6 +1335,50 @@ fn strip_inline_image_refs(text: &str) -> String {
 
     output.push_str(&text[cursor..]);
     output
+}
+
+fn strip_inline_style_tokens(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+
+    while let Some(start_rel) = text[cursor..].find("[[") {
+        let start = cursor + start_rel;
+        output.push_str(&text[cursor..start]);
+
+        let token_start = start + 2;
+        let Some(token_end_rel) = text[token_start..].find("]]") else {
+            output.push_str(&text[start..]);
+            return output;
+        };
+        let token_end = token_start + token_end_rel + 2;
+        let token = &text[start..token_end];
+
+        if is_inline_style_token(token) {
+            cursor = token_end;
+            continue;
+        }
+
+        output.push_str(token);
+        cursor = token_end;
+    }
+
+    output.push_str(&text[cursor..]);
+    output
+}
+
+fn is_inline_style_token(token: &str) -> bool {
+    if token == "[[b]]" || token == "[[/b]]" || token == "[[/fs]]" {
+        return true;
+    }
+
+    if let Some(value) = token
+        .strip_prefix("[[fs=")
+        .and_then(|rest| rest.strip_suffix("]]"))
+    {
+        return value.parse::<f32>().is_ok();
+    }
+
+    false
 }
 
 fn collapse_whitespace(text: &str) -> String {
@@ -1900,6 +1945,13 @@ mod tests {
         let note = "...\n-387e204f?w=360)\n\ndeneme\n";
         let sanitized = sanitize_note_for_preview(note);
         assert_eq!(sanitized, "... deneme");
+    }
+
+    #[test]
+    fn sanitize_note_for_preview_removes_inline_style_tokens() {
+        let note = "[[b]]bold[[/b]] [[fs=18]]large[[/fs]] text";
+        let sanitized = sanitize_note_for_preview(note);
+        assert_eq!(sanitized, "bold large text");
     }
 
     #[test]

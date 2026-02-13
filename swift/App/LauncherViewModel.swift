@@ -38,6 +38,7 @@ final class LauncherViewModel: ObservableObject {
     @Published private(set) var editorFontSize: CGFloat = editorDefaultFontSize
     @Published var errorMessage: String?
     @Published private(set) var isEditorPresented: Bool = false
+    @Published private(set) var isSettingsPresented: Bool = false
     @Published private(set) var launcherFocusRequestID: UInt64 = 0
     @Published var settingsStorageDirectoryPath: String = ""
     @Published var settingsErrorMessage: String?
@@ -48,6 +49,7 @@ final class LauncherViewModel: ObservableObject {
     private var autosaveTask: Task<Void, Never>?
     private weak var launcherWindow: NSWindow?
     private weak var editorWindow: NSWindow?
+    private weak var settingsWindow: NSWindow?
 
     func initialLoad() async {
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -71,6 +73,10 @@ final class LauncherViewModel: ObservableObject {
         editorWindow = window
     }
 
+    func registerSettingsWindow(_ window: NSWindow) {
+        settingsWindow = window
+    }
+
     func beginEditorPresentation() {
         isEditorPresented = true
         launcherWindow?.orderOut(nil)
@@ -83,6 +89,26 @@ final class LauncherViewModel: ObservableObject {
         settingsErrorMessage = nil
         settingsSuccessMessage = nil
         loadSettingsStorageDirectoryPath()
+    }
+
+    func settingsDidOpen() {
+        isSettingsPresented = true
+        launcherWindow?.orderOut(nil)
+
+        NSApp.activate(ignoringOtherApps: true)
+        if settingsWindow?.isMiniaturized == true {
+            settingsWindow?.deminiaturize(nil)
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        settingsWindow?.orderFrontRegardless()
+    }
+
+    func settingsDidClose() {
+        guard isSettingsPresented else {
+            return
+        }
+
+        isSettingsPresented = false
         revealLauncherIfNeeded()
     }
 
@@ -122,7 +148,7 @@ final class LauncherViewModel: ObservableObject {
     }
 
     func revealLauncherIfNeeded() {
-        guard !isEditorPresented, let launcherWindow else {
+        guard !isEditorPresented, !isSettingsPresented, let launcherWindow else {
             return
         }
 
@@ -137,7 +163,7 @@ final class LauncherViewModel: ObservableObject {
     }
 
     func toggleLauncherVisibilityFromHotKey() {
-        guard !isEditorPresented, let launcherWindow else {
+        guard !isEditorPresented, !isSettingsPresented, let launcherWindow else {
             return
         }
 

@@ -25,6 +25,10 @@ struct KeyEventMonitor: NSViewRepresentable {
         context.coordinator.onCmdTap = onCmdTap
         context.coordinator.isActive = true
 
+        DispatchQueue.main.async {
+            context.coordinator.window = view.window
+        }
+
         // Always create fresh monitors - dismantleNSView will clean up old ones
         context.coordinator.keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak coordinator = context.coordinator] event in
             guard let coordinator, coordinator.isActive else {
@@ -76,6 +80,11 @@ struct KeyEventMonitor: NSViewRepresentable {
         context.coordinator.window = nsView.window
         context.coordinator.onKeyDown = onKeyDown
         context.coordinator.onCmdTap = onCmdTap
+        if context.coordinator.window == nil {
+            DispatchQueue.main.async {
+                context.coordinator.window = nsView.window
+            }
+        }
     }
 
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {

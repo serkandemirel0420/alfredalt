@@ -21,6 +21,9 @@ final class AlfredAlternativeAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        if NSApp.windows.contains(where: { $0.title == "Settings" && $0.isVisible }) {
+            return
+        }
         viewModel?.revealLauncherIfNeeded()
     }
 
@@ -82,12 +85,6 @@ struct AlfredAlternativeApp: App {
                 .environmentObject(updateChecker)
                 .environmentObject(autoUpdater)
                 .environmentObject(themeManager)
-                .onAppear {
-                    // Bring settings window to front when opened
-                    DispatchQueue.main.async {
-                        NSApp.windows.first { $0.title == "Settings" }?.makeKeyAndOrderFront(nil)
-                    }
-                }
         }
         .defaultSize(width: 800, height: 550)
         .defaultPosition(.center)

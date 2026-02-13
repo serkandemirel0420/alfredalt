@@ -4,11 +4,43 @@ import SwiftUI
 private let imageRefPattern = #"!\[image\]\(alfred://image/([^\)\?]+)(?:\?w=(\d+))?\)"#
 private let imageKeyAttribute = NSAttributedString.Key("InlineImageKey")
 private let imageWidthAttribute = NSAttributedString.Key("InlineImageWidth")
+private let styleTokenPattern = #"\[\[b\]\]|\[\[/b\]\]|\[\[fs=(\d+(?:\.\d+)?)\]\]|\[\[/fs\]\]"#
+private let boldStyleOpenToken = "[[b]]"
+private let boldStyleCloseToken = "[[/b]]"
+private let fontSizeStyleOpenPrefix = "[[fs="
+private let fontSizeStyleCloseToken = "[[/fs]]"
 private let editorDefaultFontSize: CGFloat = 15
 private let editorTextColor = NSColor.labelColor
 private let resizeHandleSize: CGFloat = 24
 private let minImageWidth: CGFloat = 140
 private let maxImageWidth: CGFloat = 1200
+private let inlineStyleMinFontSize: CGFloat = 11
+private let inlineStyleMaxFontSize: CGFloat = 40
+private let minimapWidth: CGFloat = 80
+private let minimapPadding: CGFloat = 4
+
+// MARK: - Minimap Colors (adaptive for light/dark mode)
+private var minimapBackgroundColor: NSColor {
+    NSColor.systemGray.withAlphaComponent(0.08)
+}
+
+private var minimapTextColor: NSColor {
+    NSColor.labelColor.withAlphaComponent(0.25)
+}
+
+private var minimapSearchHighlightColor: NSColor {
+    NSColor.systemYellow.withAlphaComponent(0.8)
+}
+
+private var minimapViewportBorderColor: NSColor {
+    NSColor.separatorColor
+}
+
+private protocol EditorCommandDelegate: AnyObject {
+    func increaseDocumentFontSize()
+    func decreaseDocumentFontSize()
+    func currentSearchQuery() -> String
+}
 
 private func editorFont(for fontSize: CGFloat) -> NSFont {
     NSFont.systemFont(ofSize: fontSize)
@@ -45,11 +77,22 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
 
     private final class ResizableImageTextView: NSTextView {
         weak var resizeDelegate: ImageResizeDelegate?
+        weak var commandDelegate: EditorCommandDelegate?
 
         private var dragState: ImageResizeDragState?
         private var moveDragState: ImageMoveDragState?
         private var cursorState: CursorOverlay = .none
         private let moveDragThreshold: CGFloat = 5
+        
+        // MARK: - First Responder
+        
+        override var acceptsFirstResponder: Bool {
+            return true
+        }
+        
+        override func becomeFirstResponder() -> Bool {
+            return super.becomeFirstResponder()
+        }
         
         // MARK: - Paste Handling (Normalize to Plain Text)
         
@@ -73,6 +116,71 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
         override func pasteAsRichText(_ sender: Any?) {
             // Force paste as plain text even when rich text is requested
             pasteAsPlainText(sender)
+        }
+
+        override func keyDown(with event: NSEvent) {
+            if handleEditorShortcut(event) {
+                return
+            }
+            super.keyDown(with: event)
+        }
+
+        override func performKeyEquivalent(with event: NSEvent) -> Bool {
+            if handleEditorShortcut(event) {
+                return true
+            }
+            return super.performKeyEquivalent(with: event)
+        }
+
+        @objc func toggleBoldface(_ sender: Any?) {
+            _ = toggleBoldForSelection()
+        }
+
+        @objc func makeTextLarger(_ sender: Any?) {
+            _ = adjustFontSize(delta: 1)
+        }
+
+        @objc func makeTextSmaller(_ sender: Any?) {
+            _ = adjustFontSize(delta: -1)
+        }
+
+        override func changeFont(_ sender: Any?) {
+            guard let manager = sender as? NSFontManager else {
+                return
+            }
+            applyFontTransform { current in
+                manager.convert(current)
+            }
+        }
+
+        private func handleEditorShortcut(_ event: NSEvent) -> Bool {
+            let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
+
+            if modifiers == [.command],
+               event.charactersIgnoringModifiers?.lowercased() == "b" {
+                return toggleBoldForSelection()
+            }
+
+            if modifiers == [.command] || modifiers == [.command, .shift] {
+                if isIncreaseFontShortcut(event) {
+                    return adjustFontSize(delta: 1)
+                }
+                if isDecreaseFontShortcut(event) {
+                    return adjustFontSize(delta: -1)
+                }
+            }
+            
+            // Option+Up/Down to navigate to previous/next search match
+            if modifiers == [.option] {
+                if event.keyCode == 126 { // Up arrow
+                    return navigateToSearchMatch(direction: .previous)
+                }
+                if event.keyCode == 125 { // Down arrow
+                    return navigateToSearchMatch(direction: .next)
+                }
+            }
+
+            return false
         }
         
         /// Read content from pasteboard and extract plain text
@@ -108,6 +216,124 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
             }
             
             insertText(text, replacementRange: range)
+        }
+
+        private func isIncreaseFontShortcut(_ event: NSEvent) -> Bool {
+            if event.keyCode == 24 || event.keyCode == 69 {
+                return true
+            }
+
+            guard let chars = event.charactersIgnoringModifiers else {
+                return false
+            }
+            return chars == "=" || chars == "+"
+        }
+
+        private func isDecreaseFontShortcut(_ event: NSEvent) -> Bool {
+            if event.keyCode == 27 || event.keyCode == 78 {
+                return true
+            }
+
+            guard let chars = event.charactersIgnoringModifiers else {
+                return false
+            }
+            return chars == "-"
+        }
+
+        private func toggleBoldForSelection() -> Bool {
+            let range = selectedRange()
+            guard let storage = textStorage else {
+                return true
+            }
+
+            if range.length == 0 {
+                let currentFont = (typingAttributes[.font] as? NSFont) ?? font ?? editorFont(for: editorDefaultFontSize)
+                let nextFont = fontBySettingBold(currentFont, enabled: !fontIsBold(currentFont))
+                typingAttributes[.font] = nextFont
+                typingAttributes[.foregroundColor] = editorTextColor
+                return true
+            }
+
+            let shouldApplyBold = !selectionIsFullyBold(in: range, storage: storage)
+            storage.beginEditing()
+            storage.enumerateAttributes(in: range, options: []) { attrs, attrRange, _ in
+                if attrs[.attachment] != nil {
+                    return
+                }
+
+                let currentFont = (attrs[.font] as? NSFont) ?? self.font ?? editorFont(for: editorDefaultFontSize)
+                let nextFont = fontBySettingBold(currentFont, enabled: shouldApplyBold)
+                storage.addAttribute(.font, value: nextFont, range: attrRange)
+                storage.addAttribute(.foregroundColor, value: editorTextColor, range: attrRange)
+            }
+            storage.endEditing()
+            didChangeText()
+            return true
+        }
+
+        private func selectionIsFullyBold(in range: NSRange, storage: NSTextStorage) -> Bool {
+            var sawText = false
+            var allBold = true
+            storage.enumerateAttributes(in: range, options: []) { attrs, _, stop in
+                if attrs[.attachment] != nil {
+                    return
+                }
+                sawText = true
+                let currentFont = (attrs[.font] as? NSFont) ?? self.font ?? editorFont(for: editorDefaultFontSize)
+                if !fontIsBold(currentFont) {
+                    allBold = false
+                    stop.pointee = true
+                }
+            }
+            return sawText && allBold
+        }
+
+        private func adjustFontSize(delta: CGFloat) -> Bool {
+            let range = selectedRange()
+            if range.length == 0 {
+                if delta > 0 {
+                    commandDelegate?.increaseDocumentFontSize()
+                } else {
+                    commandDelegate?.decreaseDocumentFontSize()
+                }
+                return true
+            }
+
+            applyFontTransform { currentFont in
+                let nextSize = min(max(currentFont.pointSize + delta, inlineStyleMinFontSize), inlineStyleMaxFontSize)
+                return NSFont(descriptor: currentFont.fontDescriptor, size: nextSize)
+                    ?? NSFont.systemFont(ofSize: nextSize, weight: fontIsBold(currentFont) ? .bold : .regular)
+            }
+            return true
+        }
+
+        private func applyFontTransform(_ transform: (NSFont) -> NSFont) {
+            guard let storage = textStorage else {
+                return
+            }
+
+            let range = selectedRange()
+            if range.length == 0 {
+                let currentFont = (typingAttributes[.font] as? NSFont) ?? font ?? editorFont(for: editorDefaultFontSize)
+                let nextFont = transform(currentFont)
+                typingAttributes[.font] = nextFont
+                typingAttributes[.foregroundColor] = editorTextColor
+                return
+            }
+
+            storage.beginEditing()
+            storage.enumerateAttributes(in: range, options: []) { attrs, attrRange, _ in
+                if attrs[.attachment] != nil {
+                    return
+                }
+
+                let currentFont = (attrs[.font] as? NSFont) ?? self.font ?? editorFont(for: editorDefaultFontSize)
+                let nextFont = transform(currentFont)
+                storage.addAttribute(.font, value: nextFont, range: attrRange)
+                storage.addAttribute(.foregroundColor, value: editorTextColor, range: attrRange)
+            }
+            storage.endEditing()
+            didChangeText()
         }
         
         /// Normalize pasted text: strip formatting, normalize whitespace, remove HTML artifacts
@@ -691,6 +917,341 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
         let cursorPos = min(destIndex + 1, storage.length)
         setSelectedRange(NSRange(location: cursorPos, length: 0))
     }
+    
+    // MARK: - Search Navigation
+    
+    private enum SearchDirection {
+        case previous
+        case next
+    }
+    
+    /// Navigate to previous or next search match
+    private func navigateToSearchMatch(direction: SearchDirection) -> Bool {
+        guard let textView = self as NSTextView?,
+              let searchQuery = commandDelegate?.currentSearchQuery(),
+              !searchQuery.isEmpty else {
+            return false
+        }
+        
+        let text = textView.string
+        let currentRange = textView.selectedRange()
+        let searchLower = searchQuery.lowercased()
+        let textLower = text.lowercased()
+        
+        // Find all match ranges
+        var matches: [NSRange] = []
+        var searchStart = textLower.startIndex
+        
+        while let range = textLower.range(of: searchLower, range: searchStart..<textLower.endIndex) {
+            let location = textLower.distance(from: textLower.startIndex, to: range.lowerBound)
+            let length = searchLower.count
+            matches.append(NSRange(location: location, length: length))
+            searchStart = range.upperBound
+        }
+        
+        guard !matches.isEmpty else { return false }
+        
+        // Find the current match index (based on cursor position)
+        let cursorPos = currentRange.location
+        var currentMatchIndex = 0
+        
+        for (index, match) in matches.enumerated() {
+            if match.location > cursorPos {
+                currentMatchIndex = index
+                break
+            }
+            currentMatchIndex = index + 1
+        }
+        
+        // Calculate target match index with cyclic wrapping
+        let targetIndex: Int
+        switch direction {
+        case .next:
+            targetIndex = currentMatchIndex % matches.count
+        case .previous:
+            targetIndex = (currentMatchIndex - 1 + matches.count) % matches.count
+        }
+        
+        let targetMatch = matches[targetIndex]
+        
+        // Select the match and scroll to it
+        textView.setSelectedRange(targetMatch)
+        textView.scrollRangeToVisible(targetMatch)
+        
+        // Provide visual feedback by briefly highlighting
+        highlightMatchTemporarily(range: targetMatch, in: textView)
+        
+        return true
+    }
+    
+    /// Briefly highlight a match to show where we navigated to
+    private func highlightMatchTemporarily(range: NSRange, in textView: NSTextView) {
+        guard let storage = textView.textStorage else { return }
+        
+        let highlightColor = NSColor.systemYellow.withAlphaComponent(0.3)
+        let originalBg = storage.attribute(.backgroundColor, at: range.location, effectiveRange: nil) as? NSColor
+        
+        // Apply highlight
+        storage.addAttribute(.backgroundColor, value: highlightColor, range: range)
+        
+        // Remove highlight after delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard self != nil else { return }
+            
+            // Only remove if the range is still valid
+            if range.location + range.length <= storage.length {
+                if let originalBg = originalBg {
+                    storage.addAttribute(.backgroundColor, value: originalBg, range: range)
+                } else {
+                    storage.removeAttribute(.backgroundColor, range: range)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Minimap View
+
+/// A beautiful mini map that shows document overview with search result highlights
+fileprivate final class EditorMinimapView: NSView {
+    weak var textView: NSTextView?
+    var searchQuery: String = ""
+    
+    // Cached line data for efficient rendering
+    private var lineData: [(y: CGFloat, height: CGFloat, hasSearchMatch: Bool)] = []
+    private var lastTextHash: Int = 0
+    private var lastQuery: String = ""
+    private var lastContainerWidth: CGFloat = 0
+    
+    // Visual constants
+    private let scaleFactor: CGFloat = 0.15
+    private let lineSpacing: CGFloat = 1.2
+    private let maxRenderedLines = 200
+    
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupView()
+    }
+    
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupView()
+    }
+    
+    private func setupView() {
+        wantsLayer = true
+        layer?.cornerRadius = 6
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.35).cgColor
+        layer?.shadowColor = NSColor.black.cgColor
+        layer?.shadowOffset = NSSize(width: 0, height: 1)
+        layer?.shadowRadius = 2
+        layer?.shadowOpacity = 0.08
+    }
+    
+    override var isFlipped: Bool {
+        return false
+    }
+    
+    /// Update line data when text or search query changes
+    func invalidateCache() {
+        lastTextHash = 0
+        lastQuery = ""
+        lastContainerWidth = 0
+        needsDisplay = true
+    }
+    
+    private func updateLineDataIfNeeded() {
+        guard let textView = textView,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer
+        else { return }
+        
+        layoutManager.ensureLayout(for: textContainer)
+        
+        let text = textView.string
+        let currentHash = text.hash
+        let queryChanged = searchQuery != lastQuery
+        let containerWidth = textContainer.containerSize.width
+        let widthChanged = abs(containerWidth - lastContainerWidth) > 0.5
+        
+        // Only rebuild if necessary
+        guard currentHash != lastTextHash || queryChanged || widthChanged else { return }
+        
+        lastTextHash = currentHash
+        lastQuery = searchQuery
+        lastContainerWidth = containerWidth
+        
+        let fullText = text as NSString
+        let searchLower = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let glyphRange = layoutManager.glyphRange(for: textContainer)
+        
+        var generated: [(y: CGFloat, height: CGFloat, hasSearchMatch: Bool)] = []
+        generated.reserveCapacity(min(maxRenderedLines, max(1, glyphRange.length / 8)))
+        
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { _, usedRect, _, lineGlyphRange, _ in
+            let lineCharRange = layoutManager.characterRange(forGlyphRange: lineGlyphRange, actualGlyphRange: nil)
+            var hasMatch = false
+            
+            if !searchLower.isEmpty,
+               lineCharRange.length > 0,
+               NSMaxRange(lineCharRange) <= fullText.length {
+                let lineText = fullText.substring(with: lineCharRange).lowercased()
+                hasMatch = lineText.contains(searchLower)
+            }
+            
+            generated.append((
+                y: usedRect.minY,
+                height: max(1, usedRect.height),
+                hasSearchMatch: hasMatch
+            ))
+        }
+        
+        if generated.isEmpty {
+            generated.append((y: 0, height: 2, hasSearchMatch: false))
+        }
+        
+        if generated.count > maxRenderedLines {
+            let step = Double(generated.count) / Double(maxRenderedLines)
+            var sampled: [(y: CGFloat, height: CGFloat, hasSearchMatch: Bool)] = []
+            sampled.reserveCapacity(maxRenderedLines + 1)
+            
+            var cursor = 0.0
+            for _ in 0..<maxRenderedLines {
+                let idx = min(Int(cursor), generated.count - 1)
+                sampled.append(generated[idx])
+                cursor += step
+            }
+            
+            if let last = generated.last, sampled.last?.y != last.y {
+                sampled.append(last)
+            }
+            lineData = sampled
+        } else {
+            lineData = generated
+        }
+    }
+    
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        
+        guard let _ = NSGraphicsContext.current?.cgContext,
+              let textView = textView,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer
+        else { return }
+
+        layoutManager.ensureLayout(for: textContainer)
+        
+        // Update cached data
+        updateLineDataIfNeeded()
+        
+        // Draw background
+        let bgPath = NSBezierPath(roundedRect: bounds, xRadius: 6, yRadius: 6)
+        minimapBackgroundColor.setFill()
+        bgPath.fill()
+        
+        // Calculate document proportions
+        let documentHeight = max(layoutManager.usedRect(for: textContainer).height, textView.bounds.height)
+        let visibleRect = textView.enclosingScrollView?.contentView.documentVisibleRect ?? textView.visibleRect
+        let totalContentHeight = max(documentHeight, visibleRect.maxY)
+        
+        // Scale factor to fit document into minimap
+        let heightScale = (bounds.height - minimapPadding * 2) / max(totalContentHeight, 1)
+        
+        // Draw text lines as tiny bars based on actual text layout positions.
+        for line in lineData {
+            let y = minimapPadding + line.y * heightScale
+            let height = max(1, line.height * heightScale * scaleFactor + lineSpacing)
+            
+            if y + height < 0 || y > bounds.height {
+                continue // Clip lines outside visible area
+            }
+            
+            let rect = CGRect(
+                x: minimapPadding,
+                y: bounds.height - y - height,
+                width: bounds.width - minimapPadding * 2,
+                height: height
+            )
+            
+            if line.hasSearchMatch {
+                // Draw search match with glow effect
+                let glowRect = rect.insetBy(dx: -1, dy: -1)
+                let glowPath = NSBezierPath(roundedRect: glowRect, xRadius: 1.5, yRadius: 1.5)
+                minimapSearchHighlightColor.withAlphaComponent(0.3).setFill()
+                glowPath.fill()
+                
+                minimapSearchHighlightColor.setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
+            } else {
+                // Draw normal line
+                minimapTextColor.setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 0.5, yRadius: 0.5).fill()
+            }
+        }
+        
+        // Draw viewport indicator (where user is currently looking)
+        let viewportY = visibleRect.origin.y * heightScale
+        let viewportHeight = visibleRect.height * heightScale
+        let viewportRect = CGRect(
+            x: 1,
+            y: bounds.height - minimapPadding - viewportY - viewportHeight,
+            width: bounds.width - 2,
+            height: max(4, viewportHeight)
+        )
+        
+        // Viewport border
+        minimapViewportBorderColor.setStroke()
+        let viewportPath = NSBezierPath(roundedRect: viewportRect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+        viewportPath.lineWidth = 1
+        viewportPath.stroke()
+        
+        // Semi-transparent fill for viewport
+        NSColor.selectedContentBackgroundColor.withAlphaComponent(0.15).setFill()
+        NSBezierPath(roundedRect: viewportRect, xRadius: 3, yRadius: 3).fill()
+    }
+    
+    // MARK: - Mouse Interaction
+    
+    override func mouseDown(with event: NSEvent) {
+        handleMinimapClick(event: event)
+    }
+    
+    override func mouseDragged(with event: NSEvent) {
+        handleMinimapClick(event: event)
+    }
+    
+    private func handleMinimapClick(event: NSEvent) {
+        guard let textView = textView,
+              let scrollView = textView.enclosingScrollView,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer
+        else { return }
+
+        layoutManager.ensureLayout(for: textContainer)
+        
+        let point = convert(event.locationInWindow, from: nil)
+        let clickY = bounds.height - point.y
+        
+        // Calculate document position from click
+        let documentHeight = max(layoutManager.usedRect(for: textContainer).height, textView.bounds.height)
+        let heightScale = (bounds.height - minimapPadding * 2) / max(documentHeight, 1)
+        guard heightScale > 0 else { return }
+        let documentY = (clickY - minimapPadding) / heightScale
+        
+        // Scroll to position (centered)
+        let clipView = scrollView.contentView
+        let visibleHeight = clipView.bounds.height
+        let targetY = documentY - visibleHeight / 2
+        let maxOffsetY = max(0, documentHeight - visibleHeight)
+        let clampedY = min(max(0, targetY), maxOffsetY)
+        
+        clipView.scroll(to: NSPoint(x: 0, y: clampedY))
+        scrollView.reflectScrolledClipView(clipView)
+        needsDisplay = true
+    }
 }
 
 // MARK: - Resize delegate protocol
@@ -706,26 +1267,34 @@ struct InlineImageTextEditor: NSViewRepresentable {
     var searchQuery: String = ""
     var defaultImageWidth: CGFloat = 360
     var fontSize: CGFloat = editorDefaultFontSize
+    var onIncreaseDocumentFontSize: (() -> Void)?
+    var onDecreaseDocumentFontSize: (() -> Void)?
     var onSelectionChange: ((Int?) -> Void)?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
     }
 
-    func makeNSView(context: Context) -> NSScrollView {
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+
         let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
         scrollView.autohidesScrollers = true
+        scrollView.contentView.postsBoundsChangedNotifications = true
 
         let textView = ResizableImageTextView()
         textView.delegate = context.coordinator
         textView.resizeDelegate = context.coordinator
+        textView.commandDelegate = context.coordinator
         textView.isEditable = true
         textView.isSelectable = true
-        textView.isRichText = false  // Force plain text mode to prevent HTML/tables
+        // Note: isRichText is left as default (true) to allow formatting.
+        // Paste normalization (see paste(_:) overrides) handles stripping unwanted HTML.
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -748,20 +1317,71 @@ struct InlineImageTextEditor: NSViewRepresentable {
         textView.registerForDraggedTypes([])  // Disable drag-and-drop of rich content
 
         scrollView.documentView = textView
+        container.addSubview(scrollView)
         context.coordinator.textView = textView
+        context.coordinator.scrollView = scrollView
+        
+        // Create and configure minimap
+        let minimap = EditorMinimapView(frame: NSRect(x: 0, y: 0, width: minimapWidth, height: 0))
+        minimap.textView = textView
+        minimap.searchQuery = searchQuery
+        minimap.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(minimap)
+        
+        NSLayoutConstraint.activate([
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scrollView.topAnchor.constraint(equalTo: container.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: minimap.leadingAnchor, constant: -8),
+
+            minimap.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            minimap.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
+            minimap.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -4),
+            minimap.widthAnchor.constraint(equalToConstant: minimapWidth),
+        ])
+        
+        // Store minimap reference in coordinator for updates
+        context.coordinator.minimapView = minimap
+        
+        // Setup scroll notification to update minimap viewport indicator
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.textViewDidScroll(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
+        
         context.coordinator.renderIfNeeded(force: true)
 
-        return scrollView
+        return container
     }
 
-    func updateNSView(_ nsView: NSScrollView, context: Context) {
+    func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.renderIfNeeded(force: false)
+        
+        // Update minimap search query
+        context.coordinator.minimapView?.searchQuery = searchQuery
+        context.coordinator.minimapView?.invalidateCache()
     }
 
-    final class Coordinator: NSObject, NSTextViewDelegate, ImageResizeDelegate {
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        let observedContentView = coordinator.scrollView?.contentView
+        NotificationCenter.default.removeObserver(
+            coordinator,
+            name: NSView.boundsDidChangeNotification,
+            object: observedContentView
+        )
+        coordinator.textView = nil
+        coordinator.scrollView = nil
+        coordinator.minimapView = nil
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate, ImageResizeDelegate, EditorCommandDelegate {
         var parent: InlineImageTextEditor
         weak var textView: NSTextView?
+        weak var scrollView: NSScrollView?
+        fileprivate weak var minimapView: EditorMinimapView?
 
         private var isApplyingProgrammaticUpdate = false
         private var lastRenderedText: String = ""
@@ -772,11 +1392,29 @@ struct InlineImageTextEditor: NSViewRepresentable {
         init(parent: InlineImageTextEditor) {
             self.parent = parent
         }
+        
+        // MARK: Scroll Handling
+        
+        @objc func textViewDidScroll(_ notification: Notification) {
+            minimapView?.needsDisplay = true
+        }
 
         // MARK: ImageResizeDelegate
 
         func originalImageData(forKey key: String) -> Data? {
             parent.imagesByKey[key]
+        }
+
+        func increaseDocumentFontSize() {
+            parent.onIncreaseDocumentFontSize?()
+        }
+
+        func decreaseDocumentFontSize() {
+            parent.onDecreaseDocumentFontSize?()
+        }
+        
+        func currentSearchQuery() -> String {
+            return parent.searchQuery
         }
 
         func imageDidResize() {
@@ -787,16 +1425,24 @@ struct InlineImageTextEditor: NSViewRepresentable {
             applyEditorTypingAppearance(to: textView, fontSize: parent.fontSize)
             isApplyingProgrammaticUpdate = false
 
-            let plain = makePlainText(from: textView.attributedString())
+            let plain = makePlainText(from: textView.attributedString(), baseFontSize: parent.fontSize, closeOpenStylesAtEnd: true)
             if plain != parent.text {
                 parent.text = plain
                 lastRenderedText = plain
             }
+            minimapView?.invalidateCache()
         }
 
         func renderIfNeeded(force: Bool) {
             guard let textView else {
                 return
+            }
+            
+            // Auto-focus text view on first render
+            if lastRenderedText.isEmpty && !parent.text.isEmpty {
+                DispatchQueue.main.async {
+                    textView.window?.makeFirstResponder(textView)
+                }
             }
 
             let signature = imageSignature(parent.imagesByKey)
@@ -831,6 +1477,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
             lastRenderedFontSize = parent.fontSize
             lastRenderedQuery = parent.searchQuery
             publishSelectionIfNeeded()
+            minimapView?.invalidateCache()
         }
 
         func textDidChange(_ notification: Notification) {
@@ -849,12 +1496,15 @@ struct InlineImageTextEditor: NSViewRepresentable {
             isApplyingProgrammaticUpdate = false
 
             // Safely extract plain text
-            let plain = makePlainText(from: textView.attributedString())
+            let plain = makePlainText(from: textView.attributedString(), baseFontSize: parent.fontSize, closeOpenStylesAtEnd: true)
             
             if plain != parent.text {
                 parent.text = plain
                 lastRenderedText = plain
             }
+            
+            // Update minimap when text changes
+            minimapView?.invalidateCache()
 
             publishSelectionIfNeeded()
         }
@@ -881,7 +1531,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
             }
 
             let prefix = textView.attributedString().attributedSubstring(from: NSRange(location: 0, length: clamped))
-            return makePlainText(from: prefix).count
+            return makePlainText(from: prefix, baseFontSize: parent.fontSize, closeOpenStylesAtEnd: false).count
         }
 
         private func attributedLocation(fromPlainOffset plainOffset: Int, in textView: NSTextView) -> Int {
@@ -893,7 +1543,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
             while low < high {
                 let mid = (low + high) / 2
                 let prefix = attributed.attributedSubstring(from: NSRange(location: 0, length: mid))
-                let plainCount = makePlainText(from: prefix).count
+                let plainCount = makePlainText(from: prefix, baseFontSize: parent.fontSize, closeOpenStylesAtEnd: false).count
                 if plainCount < plainOffset {
                     low = mid + 1
                 } else {
@@ -924,10 +1574,10 @@ private func makeAttributedText(
     fontSize: CGFloat
 ) -> NSAttributedString {
     let output = NSMutableAttributedString()
-    let baseAttributes = editorBaseAttributes(fontSize: fontSize)
 
-    guard let regex = try? NSRegularExpression(pattern: imageRefPattern) else {
-        output.append(NSAttributedString(string: plainText, attributes: baseAttributes))
+    let combinedPattern = "\(imageRefPattern)|\(styleTokenPattern)"
+    guard let regex = try? NSRegularExpression(pattern: combinedPattern) else {
+        output.append(NSAttributedString(string: plainText, attributes: editorBaseAttributes(fontSize: fontSize)))
         return output
     }
 
@@ -935,45 +1585,73 @@ private func makeAttributedText(
     let matches = regex.matches(in: plainText, range: fullRange)
 
     var cursor = plainText.startIndex
+    var boldDepth = 0
+    var fontSizeStack: [CGFloat] = []
+
+    func activeAttributes() -> [NSAttributedString.Key: Any] {
+        let activeSize = fontSizeStack.last ?? fontSize
+        return [
+            .font: styledEditorFont(size: activeSize, bold: boldDepth > 0),
+            .foregroundColor: editorTextColor,
+        ]
+    }
 
     for match in matches {
-        guard let matchRange = Range(match.range(at: 0), in: plainText),
-              let keyRange = Range(match.range(at: 1), in: plainText)
-        else {
+        guard let matchRange = Range(match.range(at: 0), in: plainText) else {
             continue
         }
 
         if cursor < matchRange.lowerBound {
             let prefix = plainText[cursor..<matchRange.lowerBound]
-            output.append(NSAttributedString(string: String(prefix), attributes: baseAttributes))
+            output.append(NSAttributedString(string: String(prefix), attributes: activeAttributes()))
         }
 
-        let key = String(plainText[keyRange])
-        let width = extractedWidth(match: match, from: plainText) ?? Double(defaultImageWidth)
+        if let keyRange = Range(match.range(at: 1), in: plainText) {
+            let key = String(plainText[keyRange])
+            let width = extractedWidth(match: match, from: plainText) ?? Double(defaultImageWidth)
 
-        if let data = imagesByKey[key], let image = NSImage(data: data) {
-            let resized = resizedImage(image, targetWidth: CGFloat(width))
-            let framed = imageWithBorder(resized)
-            let attachment = NSTextAttachment()
-            attachment.image = framed
-            attachment.bounds = NSRect(origin: .zero, size: framed.size)
+            if let data = imagesByKey[key], let image = NSImage(data: data) {
+                let resized = resizedImage(image, targetWidth: CGFloat(width))
+                let framed = imageWithBorder(resized)
+                let attachment = NSTextAttachment()
+                attachment.image = framed
+                attachment.bounds = NSRect(origin: .zero, size: framed.size)
 
-            let attachmentString = NSMutableAttributedString(attachment: attachment)
-            attachmentString.addAttributes([
-                imageKeyAttribute: key,
-                imageWidthAttribute: Int(width.rounded()),
-            ], range: NSRange(location: 0, length: attachmentString.length))
-
-            output.append(attachmentString)
+                let attachmentString = NSMutableAttributedString(attachment: attachment)
+                attachmentString.addAttributes([
+                    imageKeyAttribute: key,
+                    imageWidthAttribute: Int(width.rounded()),
+                ], range: NSRange(location: 0, length: attachmentString.length))
+                output.append(attachmentString)
+            } else {
+                output.append(NSAttributedString(string: String(plainText[matchRange]), attributes: activeAttributes()))
+            }
         } else {
-            output.append(NSAttributedString(string: String(plainText[matchRange]), attributes: baseAttributes))
+            let token = String(plainText[matchRange])
+            if token == boldStyleOpenToken {
+                boldDepth += 1
+            } else if token == boldStyleCloseToken {
+                boldDepth = max(0, boldDepth - 1)
+            } else if token == fontSizeStyleCloseToken {
+                if !fontSizeStack.isEmpty {
+                    fontSizeStack.removeLast()
+                }
+            } else if token.hasPrefix(fontSizeStyleOpenPrefix), token.hasSuffix("]]") {
+                let valueStart = token.index(token.startIndex, offsetBy: fontSizeStyleOpenPrefix.count)
+                let valueEnd = token.index(token.endIndex, offsetBy: -2)
+                if valueStart <= valueEnd,
+                   let size = Double(token[valueStart..<valueEnd]) {
+                    let parsed = CGFloat(size)
+                    fontSizeStack.append(min(max(parsed, inlineStyleMinFontSize), inlineStyleMaxFontSize))
+                }
+            }
         }
 
         cursor = matchRange.upperBound
     }
 
     if cursor < plainText.endIndex {
-        output.append(NSAttributedString(string: String(plainText[cursor...]), attributes: baseAttributes))
+        output.append(NSAttributedString(string: String(plainText[cursor...]), attributes: activeAttributes()))
     }
 
     if !searchQuery.isEmpty {
@@ -1012,10 +1690,11 @@ private func highlightSearchTerms(in attributedString: NSMutableAttributedString
 }
 
 private func applyEditorTypingAppearance(to textView: NSTextView, fontSize: CGFloat) {
-    textView.font = editorFont(for: fontSize)
-    textView.textColor = editorTextColor
     textView.insertionPointColor = editorTextColor
-    textView.typingAttributes = editorBaseAttributes(fontSize: fontSize)
+    var attributes = textView.typingAttributes
+    attributes[.font] = editorFont(for: fontSize)
+    attributes[.foregroundColor] = editorTextColor
+    textView.typingAttributes = attributes
 }
 
 private func normalizeVisibleTextAttributes(in textView: NSTextView, fontSize: CGFloat) {
@@ -1028,25 +1707,30 @@ private func normalizeVisibleTextAttributes(in textView: NSTextView, fontSize: C
         return
     }
 
-    var plainTextRanges: [NSRange] = []
-    storage.enumerateAttribute(.attachment, in: fullRange, options: []) { attachment, range, _ in
-        if attachment == nil {
-            plainTextRanges.append(range)
-        }
-    }
-
-    guard !plainTextRanges.isEmpty else {
-        return
-    }
-
     storage.beginEditing()
-    for range in plainTextRanges {
-        storage.addAttributes(editorBaseAttributes(fontSize: fontSize), range: range)
+    storage.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
+        if attrs[.attachment] != nil {
+            return
+        }
+        var updates: [NSAttributedString.Key: Any] = [:]
+        if attrs[.foregroundColor] == nil {
+            updates[.foregroundColor] = editorTextColor
+        }
+        if attrs[.font] == nil {
+            updates[.font] = editorFont(for: fontSize)
+        }
+        if !updates.isEmpty {
+            storage.addAttributes(updates, range: range)
+        }
     }
     storage.endEditing()
 }
 
-private func makePlainText(from attributed: NSAttributedString) -> String {
+private func makePlainText(
+    from attributed: NSAttributedString,
+    baseFontSize: CGFloat,
+    closeOpenStylesAtEnd: Bool
+) -> String {
     var output = ""
     let fullRange = NSRange(location: 0, length: attributed.length)
     
@@ -1055,7 +1739,10 @@ private func makePlainText(from attributed: NSAttributedString) -> String {
         return attributed.string
     }
 
-    attributed.enumerateAttributes(in: fullRange, options: []) { attrs, range, stop in
+    var activeBold = false
+    var activeFontSize: CGFloat?
+
+    attributed.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
         // Check if this is an image attachment
         if let key = attrs[imageKeyAttribute] as? String {
             let width = attrs[imageWidthAttribute] as? Int
@@ -1066,6 +1753,23 @@ private func makePlainText(from attributed: NSAttributedString) -> String {
             }
             return
         }
+
+        let runFont = attrs[.font] as? NSFont
+        let runBold = runFont.map(fontIsBold) ?? false
+        let runSize = runFont?.pointSize
+        let runFontSize: CGFloat?
+        if let runSize, abs(runSize - baseFontSize) > 0.01 {
+            runFontSize = runSize
+        } else {
+            runFontSize = nil
+        }
+
+        output += styleTransitionTokens(
+            activeBold: &activeBold,
+            activeFontSize: &activeFontSize,
+            targetBold: runBold,
+            targetFontSize: runFontSize
+        )
 
         // Safely extract text from this range
         let rangeEnd = min(range.location + range.length, attributed.string.utf16.count)
@@ -1080,7 +1784,77 @@ private func makePlainText(from attributed: NSAttributedString) -> String {
         output += String(attributed.string[swiftRange])
     }
 
+    if closeOpenStylesAtEnd {
+        if activeFontSize != nil {
+            output += fontSizeStyleCloseToken
+        }
+        if activeBold {
+            output += boldStyleCloseToken
+        }
+    }
+
     return output
+}
+
+private func styleTransitionTokens(
+    activeBold: inout Bool,
+    activeFontSize: inout CGFloat?,
+    targetBold: Bool,
+    targetFontSize: CGFloat?
+) -> String {
+    var output = ""
+
+    if activeFontSize != targetFontSize, activeFontSize != nil {
+        output += fontSizeStyleCloseToken
+        activeFontSize = nil
+    }
+    if activeBold != targetBold, activeBold {
+        output += boldStyleCloseToken
+        activeBold = false
+    }
+    if activeBold != targetBold, targetBold {
+        output += boldStyleOpenToken
+        activeBold = true
+    }
+    if activeFontSize != targetFontSize, let targetFontSize {
+        output += "\(fontSizeStyleOpenPrefix)\(formattedFontSize(targetFontSize))]]"
+        activeFontSize = targetFontSize
+    }
+
+    return output
+}
+
+private func formattedFontSize(_ value: CGFloat) -> String {
+    let rounded = value.rounded()
+    if abs(value - rounded) < 0.01 {
+        return String(Int(rounded))
+    }
+    return String(Double(value))
+}
+
+private func fontIsBold(_ font: NSFont) -> Bool {
+    font.fontDescriptor.symbolicTraits.contains(.bold)
+}
+
+private func fontBySettingBold(_ font: NSFont, enabled: Bool) -> NSFont {
+    let manager = NSFontManager.shared
+    let converted = enabled
+        ? manager.convert(font, toHaveTrait: .boldFontMask)
+        : manager.convert(font, toNotHaveTrait: .boldFontMask)
+
+    let candidate = NSFont(descriptor: converted.fontDescriptor, size: font.pointSize) ?? converted
+    if fontIsBold(candidate) == enabled {
+        return candidate
+    }
+
+    // Some descriptors do not reliably toggle weight traits; force a visible fallback.
+    return NSFont.systemFont(ofSize: font.pointSize, weight: enabled ? .bold : .regular)
+}
+
+private func styledEditorFont(size: CGFloat, bold: Bool) -> NSFont {
+    let clamped = min(max(size, inlineStyleMinFontSize), inlineStyleMaxFontSize)
+    let base = editorFont(for: clamped)
+    return bold ? fontBySettingBold(base, enabled: true) : fontBySettingBold(base, enabled: false)
 }
 
 private func extractedWidth(match: NSTextCheckingResult, from text: String) -> Double? {

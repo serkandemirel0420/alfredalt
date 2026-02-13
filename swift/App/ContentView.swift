@@ -11,6 +11,10 @@ private let launcherShellPadding: CGFloat = 14
 private let launcherResultsCornerRadius: CGFloat = launcherShellCornerRadius - launcherShellPadding
 private let keyHandlingModifierMask: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
 private let actionMenuRowHeight: CGFloat = 44
+private let editorDocumentFontSizesDefaultsKey = "editorDocumentFontSizes"
+private let editorDocumentMinFontSize: CGFloat = 11
+private let editorDocumentMaxFontSize: CGFloat = 40
+private let editorDocumentFontSizeStep: CGFloat = 1
 
 private struct LauncherShellHeightPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = launcherEmptyHeight
@@ -566,9 +570,6 @@ struct EditorWindowView: View {
                 viewModel.registerEditorWindow(window)
             }
         )
-        .onAppear {
-            viewModel.beginEditorPresentation()
-        }
         .onDisappear {
             viewModel.editorDidClose()
         }
@@ -979,8 +980,17 @@ struct SettingsWindowView: View {
             .padding(18)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .background(
+            WindowAccessor { window in
+                viewModel.registerSettingsWindow(window)
+            }
+        )
         .onAppear {
             viewModel.loadSettingsStorageDirectoryPath()
+            viewModel.settingsDidOpen()
+        }
+        .onDisappear {
+            viewModel.settingsDidClose()
         }
         .onChange(of: viewModel.settingsStorageDirectoryPath) { _, _ in
             if viewModel.settingsSuccessMessage != nil {
@@ -1749,9 +1759,10 @@ private struct ThemeCard: View {
 private struct EditorSheet: View {
     @ObservedObject var viewModel: LauncherViewModel
     @EnvironmentObject var themeManager: ThemeManager
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.dismissWindow) private var dismissWindow
     @State private var editorCursorCharIndex: Int?
     @State private var isClosingEditor = false
+    @State private var documentFontSize: CGFloat = 15
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1764,7 +1775,13 @@ private struct EditorSheet: View {
                 imagesByKey: Dictionary(uniqueKeysWithValues: (viewModel.selectedItem?.images ?? []).map { ($0.imageKey, $0.bytes) }),
                 searchQuery: viewModel.query,
                 defaultImageWidth: 360,
-                fontSize: themeManager.editorFontSize
+                fontSize: documentFontSize,
+                onIncreaseDocumentFontSize: {
+                    adjustDocumentFontSize(by: editorDocumentFontSizeStep)
+                },
+                onDecreaseDocumentFontSize: {
+                    adjustDocumentFontSize(by: -editorDocumentFontSizeStep)
+                }
             ) { cursorIndex in
                 editorCursorCharIndex = cursorIndex
             }
@@ -1785,6 +1802,13 @@ private struct EditorSheet: View {
         }
         .onAppear {
             isClosingEditor = false
+            refreshDocumentFontSize()
+        }
+        .onChange(of: viewModel.selectedItem?.id) { _, _ in
+            refreshDocumentFontSize()
+        }
+        .onChange(of: documentFontSize) { _, newValue in
+            persistDocumentFontSize(newValue)
         }
         .onDisappear {
             if isClosingEditor {
@@ -1792,14 +1816,13 @@ private struct EditorSheet: View {
             }
             Task { await viewModel.flushAutosave() }
         }
+        .onExitCommand {
+            closeEditorWindow()
+        }
     }
 
     private func handleEditorKeyEvent(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(keyHandlingModifierMask)
-
-        if handleEditorFontSizeShortcut(event, modifiers: modifiers) {
-            return true
-        }
 
         if modifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "v",
@@ -1809,50 +1832,60 @@ private struct EditorSheet: View {
         }
 
         if modifiers.isEmpty, event.keyCode == 53 {
-            guard !isClosingEditor else {
-                return true
-            }
-
-            isClosingEditor = true
-            Task { @MainActor in
-                _ = await viewModel.flushAutosave()
-            }
-            dismiss()
+            closeEditorWindow()
             return true
         }
 
         return false
     }
 
-    private func handleEditorFontSizeShortcut(_ event: NSEvent, modifiers: NSEvent.ModifierFlags) -> Bool {
-        guard modifiers == [.command] || modifiers == [.command, .shift] else {
-            return false
+    private func adjustDocumentFontSize(by delta: CGFloat) {
+        let next = min(max(documentFontSize + delta, editorDocumentMinFontSize), editorDocumentMaxFontSize)
+        if abs(next - documentFontSize) > 0.01 {
+            documentFontSize = next
+        }
+    }
+
+    private func closeEditorWindow() {
+        guard !isClosingEditor else {
+            return
         }
 
-        switch event.keyCode {
-        case 24, 69: // =/+ and keypad +
-            themeManager.increaseEditorFontSize()
-            return true
-        case 27, 78: // - and keypad -
-            themeManager.decreaseEditorFontSize()
-            return true
-        default:
-            break
+        isClosingEditor = true
+        Task { @MainActor in
+            dismissWindow(id: "editor")
+            _ = await viewModel.flushAutosave()
+        }
+    }
+
+    private func refreshDocumentFontSize() {
+        let base = themeManager.editorFontSize
+        guard let itemId = viewModel.selectedItem?.id else {
+            documentFontSize = base
+            return
+        }
+        documentFontSize = loadDocumentFontSize(itemId: itemId) ?? base
+    }
+
+    private func loadDocumentFontSize(itemId: Int64) -> CGFloat? {
+        let raw = UserDefaults.standard.dictionary(forKey: editorDocumentFontSizesDefaultsKey) ?? [:]
+        guard let value = raw[String(itemId)] as? NSNumber else {
+            return nil
+        }
+        let parsed = CGFloat(value.doubleValue)
+        guard parsed.isFinite else {
+            return nil
+        }
+        return min(max(parsed, editorDocumentMinFontSize), editorDocumentMaxFontSize)
+    }
+
+    private func persistDocumentFontSize(_ fontSize: CGFloat) {
+        guard let itemId = viewModel.selectedItem?.id else {
+            return
         }
 
-        guard let chars = event.charactersIgnoringModifiers else {
-            return false
-        }
-
-        switch chars {
-        case "=", "+":
-            themeManager.increaseEditorFontSize()
-            return true
-        case "-":
-            themeManager.decreaseEditorFontSize()
-            return true
-        default:
-            return false
-        }
+        var raw = UserDefaults.standard.dictionary(forKey: editorDocumentFontSizesDefaultsKey) ?? [:]
+        raw[String(itemId)] = Double(fontSize)
+        UserDefaults.standard.set(raw, forKey: editorDocumentFontSizesDefaultsKey)
     }
 }
