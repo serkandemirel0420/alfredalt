@@ -973,6 +973,7 @@ struct SettingsWindowView: View {
     enum SettingsTab: String, CaseIterable, Identifiable {
         case general = "General"
         case appearance = "Appearance"
+        case editor = "Editor"
         case hotkeys = "Hotkeys"
         
         var id: String { rawValue }
@@ -981,6 +982,7 @@ struct SettingsWindowView: View {
             switch self {
             case .general: return "gear"
             case .appearance: return "paintbrush"
+            case .editor: return "doc.text"
             case .hotkeys: return "keyboard"
             }
         }
@@ -1013,6 +1015,8 @@ struct SettingsWindowView: View {
                     generalTab
                 case .appearance:
                     appearanceTab
+                case .editor:
+                    editorTab
                 case .hotkeys:
                     hotkeysTab
                 }
@@ -1230,7 +1234,7 @@ struct SettingsWindowView: View {
                     .font(.system(size: 12))
                 }
             }
-            
+
             Spacer()
         }
     }
@@ -1275,6 +1279,51 @@ struct SettingsWindowView: View {
                 
                 customColorsSection
                 
+                Spacer(minLength: 20)
+            }
+            .padding(.bottom, 10)
+        }
+    }
+
+    private var editorTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Divider (`---`)")
+                        .font(.system(size: 14, weight: .medium))
+
+                    Text("Type a line containing only `---` to insert a styled divider.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+
+                    ColorPickerRow(
+                        label: "Divider Color",
+                        color: $themeManager.editorDividerColor
+                    )
+
+                    FontSizeRow(
+                        label: "Top Margin",
+                        value: $themeManager.editorDividerTopMargin,
+                        range: 0...24,
+                        defaultValue: 6
+                    )
+
+                    FontSizeRow(
+                        label: "Bottom Margin",
+                        value: $themeManager.editorDividerBottomMargin,
+                        range: 0...24,
+                        defaultValue: 6
+                    )
+
+                    HStack {
+                        Spacer()
+                        Button("Reset Divider Style") {
+                            themeManager.resetEditorDividerStyle()
+                        }
+                        .font(.system(size: 12))
+                    }
+                }
+
                 Spacer(minLength: 20)
             }
             .padding(.bottom, 10)
@@ -1828,6 +1877,9 @@ private struct EditorSheet: View {
                 imagesByKey: Dictionary(uniqueKeysWithValues: (viewModel.selectedItem?.images ?? []).map { ($0.imageKey, $0.bytes) }),
                 searchQuery: viewModel.query,
                 highlightSearchMatches: themeManager.editorSearchHighlightsEnabled,
+                dividerColor: themeManager.editorDividerColor,
+                dividerTopMargin: themeManager.editorDividerTopMargin,
+                dividerBottomMargin: themeManager.editorDividerBottomMargin,
                 defaultImageWidth: 360,
                 fontSize: documentFontSize,
                 onIncreaseDocumentFontSize: {

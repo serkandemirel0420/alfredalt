@@ -4,6 +4,8 @@ import SwiftUI
 private let imageRefPattern = #"!\[image\]\(alfred://image/([^\)\?]+)(?:\?w=(\d+))?\)"#
 private let imageKeyAttribute = NSAttributedString.Key("InlineImageKey")
 private let imageWidthAttribute = NSAttributedString.Key("InlineImageWidth")
+private let dividerMarkerAttribute = NSAttributedString.Key("EditorDividerMarker")
+private let dividerLinePattern = #"(?m)^[ \t]*---[ \t]*$"#
 private let styleTokenPattern = #"\[\[b\]\]|\[\[/b\]\]|\[\[fs=(\d+(?:\.\d+)?)\]\]|\[\[/fs\]\]"#
 private let boldStyleOpenToken = "[[b]]"
 private let boldStyleCloseToken = "[[/b]]"
@@ -18,6 +20,7 @@ private let inlineStyleMinFontSize: CGFloat = 11
 private let inlineStyleMaxFontSize: CGFloat = 40
 private let minimapWidth: CGFloat = 80
 private let minimapPadding: CGFloat = 4
+private let dividerLineThickness: CGFloat = 1
 
 // MARK: - Minimap Colors (adaptive for light/dark mode)
 private var minimapBackgroundColor: NSColor {
@@ -1027,6 +1030,7 @@ fileprivate final class EditorMinimapView: NSView {
     private var lastQuery: String = ""
     private var lastHighlightSearchMatches = true
     private var lastContainerWidth: CGFloat = 0
+    private var viewportDragOffsetFromTop: CGFloat?
     
     // Visual constants
     private let scaleFactor: CGFloat = 0.15
@@ -1227,40 +1231,97 @@ fileprivate final class EditorMinimapView: NSView {
     // MARK: - Mouse Interaction
     
     override func mouseDown(with event: NSEvent) {
-        handleMinimapClick(event: event)
+        guard let metrics = minimapInteractionMetrics() else {
+            return
+        }
+        let clickYFromTop = clickYFromTop(for: event)
+        let isInsideViewport = clickYFromTop >= metrics.viewportTopFromTop &&
+            clickYFromTop <= metrics.viewportTopFromTop + metrics.viewportHeight
+        let relativeToViewportTop = clickYFromTop - metrics.viewportTopFromTop
+        let dragOffset = min(max(relativeToViewportTop, 0), metrics.viewportHeight)
+        viewportDragOffsetFromTop = dragOffset
+        // Do not move on initial click when grabbing the viewport; move only on drag.
+        if isInsideViewport {
+            return
+        }
+        scrollViewport(toClickYFromTop: clickYFromTop, dragOffsetFromTop: dragOffset, metrics: metrics)
     }
     
     override func mouseDragged(with event: NSEvent) {
-        handleMinimapClick(event: event)
+        guard let dragOffset = viewportDragOffsetFromTop,
+              let metrics = minimapInteractionMetrics() else {
+            return
+        }
+        scrollViewport(
+            toClickYFromTop: clickYFromTop(for: event),
+            dragOffsetFromTop: dragOffset,
+            metrics: metrics
+        )
     }
-    
-    private func handleMinimapClick(event: NSEvent) {
+
+    override func mouseUp(with event: NSEvent) {
+        viewportDragOffsetFromTop = nil
+    }
+
+    private struct MinimapInteractionMetrics {
+        let clipView: NSClipView
+        let scrollView: NSScrollView
+        let viewportHeight: CGFloat
+        let viewportTopFromTop: CGFloat
+        let heightScale: CGFloat
+        let maxOffsetY: CGFloat
+    }
+
+    private func clickYFromTop(for event: NSEvent) -> CGFloat {
+        let point = convert(event.locationInWindow, from: nil)
+        return bounds.height - point.y
+    }
+
+    private func minimapInteractionMetrics() -> MinimapInteractionMetrics? {
         guard let textView = textView,
               let scrollView = textView.enclosingScrollView,
               let layoutManager = textView.layoutManager,
               let textContainer = textView.textContainer
-        else { return }
+        else { return nil }
 
         layoutManager.ensureLayout(for: textContainer)
-        
-        let point = convert(event.locationInWindow, from: nil)
-        let clickY = bounds.height - point.y
-        
-        // Calculate document position from click
+
         let documentHeight = max(layoutManager.usedRect(for: textContainer).height, textView.bounds.height)
-        let heightScale = (bounds.height - minimapPadding * 2) / max(documentHeight, 1)
-        guard heightScale > 0 else { return }
-        let documentY = (clickY - minimapPadding) / heightScale
-        
-        // Scroll to position (centered)
         let clipView = scrollView.contentView
-        let visibleHeight = clipView.bounds.height
-        let targetY = documentY - visibleHeight / 2
-        let maxOffsetY = max(0, documentHeight - visibleHeight)
-        let clampedY = min(max(0, targetY), maxOffsetY)
-        
-        clipView.scroll(to: NSPoint(x: 0, y: clampedY))
-        scrollView.reflectScrolledClipView(clipView)
+        let visibleRect = clipView.documentVisibleRect
+        let totalContentHeight = max(documentHeight, visibleRect.maxY)
+        let heightScale = (bounds.height - minimapPadding * 2) / max(totalContentHeight, 1)
+        guard heightScale > 0 else { return nil }
+
+        let viewportHeight = max(4, visibleRect.height * heightScale)
+        let viewportTopFromTop = minimapPadding + visibleRect.origin.y * heightScale
+        let maxOffsetY = max(0, documentHeight - visibleRect.height)
+
+        return MinimapInteractionMetrics(
+            clipView: clipView,
+            scrollView: scrollView,
+            viewportHeight: viewportHeight,
+            viewportTopFromTop: viewportTopFromTop,
+            heightScale: heightScale,
+            maxOffsetY: maxOffsetY
+        )
+    }
+
+    private func scrollViewport(
+        toClickYFromTop clickYFromTop: CGFloat,
+        dragOffsetFromTop: CGFloat,
+        metrics: MinimapInteractionMetrics
+    ) {
+        let rawTopFromTop = clickYFromTop - dragOffsetFromTop
+        let minTopFromTop = minimapPadding
+        let maxTopFromTop = max(minTopFromTop, bounds.height - minimapPadding - metrics.viewportHeight)
+        let clampedTopFromTop = min(max(rawTopFromTop, minTopFromTop), maxTopFromTop)
+
+        let rawDocumentOffset = (clampedTopFromTop - minimapPadding) / metrics.heightScale
+        let clampedDocumentOffset = min(max(0, rawDocumentOffset), metrics.maxOffsetY)
+
+        metrics.clipView.scroll(to: NSPoint(x: 0, y: clampedDocumentOffset))
+        metrics.scrollView.reflectScrolledClipView(metrics.clipView)
         needsDisplay = true
     }
 }
@@ -1277,6 +1338,9 @@ struct InlineImageTextEditor: NSViewRepresentable {
     var imagesByKey: [String: Data]
     var searchQuery: String = ""
     var highlightSearchMatches: Bool = true
+    var dividerColor: Color = Color(red: 0.72, green: 0.86, blue: 0.98)
+    var dividerTopMargin: CGFloat = 6
+    var dividerBottomMargin: CGFloat = 6
     var defaultImageWidth: CGFloat = 360
     var fontSize: CGFloat = editorDefaultFontSize
     var onIncreaseDocumentFontSize: (() -> Void)?
@@ -1403,6 +1467,8 @@ struct InlineImageTextEditor: NSViewRepresentable {
         private var lastImageSignature: Int = 0
         private var lastRenderedFontSize: CGFloat = editorDefaultFontSize
         private var lastRenderedHighlightState = true
+        private var lastRenderedDividerStyleSignature: Int = 0
+        private var lastRenderedContainerWidth: CGFloat = 0
 
         init(parent: InlineImageTextEditor) {
             self.parent = parent
@@ -1473,7 +1539,16 @@ struct InlineImageTextEditor: NSViewRepresentable {
             let fontSizeChanged = abs(parent.fontSize - lastRenderedFontSize) > 0.01
             let queryChanged = parent.searchQuery != lastRenderedQuery
             let highlightStateChanged = parent.highlightSearchMatches != lastRenderedHighlightState
-            guard force || parent.text != lastRenderedText || signature != lastImageSignature || fontSizeChanged || queryChanged || highlightStateChanged else {
+            let dividerStyleSignature = dividerStyleSignature(
+                color: parent.dividerColor,
+                topMargin: parent.dividerTopMargin,
+                bottomMargin: parent.dividerBottomMargin
+            )
+            let dividerStyleChanged = dividerStyleSignature != lastRenderedDividerStyleSignature
+            let containerWidth = textView.textContainer?.containerSize.width ?? textView.bounds.width
+            let widthChanged = abs(containerWidth - lastRenderedContainerWidth) > 0.5
+
+            guard force || parent.text != lastRenderedText || signature != lastImageSignature || fontSizeChanged || queryChanged || highlightStateChanged || dividerStyleChanged || widthChanged else {
                 return
             }
 
@@ -1485,6 +1560,10 @@ struct InlineImageTextEditor: NSViewRepresentable {
                 from: parent.text,
                 imagesByKey: parent.imagesByKey,
                 searchQuery: parent.searchQuery,
+                dividerColor: NSColor(parent.dividerColor),
+                dividerTopMargin: parent.dividerTopMargin,
+                dividerBottomMargin: parent.dividerBottomMargin,
+                contentWidth: containerWidth,
                 defaultImageWidth: parent.defaultImageWidth,
                 fontSize: parent.fontSize
             )
@@ -1507,6 +1586,8 @@ struct InlineImageTextEditor: NSViewRepresentable {
             lastRenderedFontSize = parent.fontSize
             lastRenderedQuery = parent.searchQuery
             lastRenderedHighlightState = parent.highlightSearchMatches
+            lastRenderedDividerStyleSignature = dividerStyleSignature
+            lastRenderedContainerWidth = containerWidth
             publishSelectionIfNeeded()
             minimapView?.invalidateCache()
         }
@@ -1533,10 +1614,17 @@ struct InlineImageTextEditor: NSViewRepresentable {
 
             // Safely extract plain text
             let plain = makePlainText(from: textView.attributedString(), baseFontSize: parent.fontSize, closeOpenStylesAtEnd: true)
-            
+            let hasPendingDividerToken = textViewHasPendingDividerToken(textView)
+
             if plain != parent.text {
                 parent.text = plain
-                lastRenderedText = plain
+                if !hasPendingDividerToken {
+                    lastRenderedText = plain
+                }
+            }
+
+            if hasPendingDividerToken {
+                renderIfNeeded(force: true)
             }
             
             // Update minimap when text changes
@@ -1599,6 +1687,36 @@ struct InlineImageTextEditor: NSViewRepresentable {
                 }
                 .finalize()
         }
+
+        private func textViewHasPendingDividerToken(_ textView: NSTextView) -> Bool {
+            let visible = textView.string
+            guard visible.contains("---") else {
+                return false
+            }
+            guard let regex = try? NSRegularExpression(pattern: dividerLinePattern) else {
+                return false
+            }
+            let range = NSRange(location: 0, length: (visible as NSString).length)
+            return regex.firstMatch(in: visible, range: range) != nil
+        }
+
+        private func dividerStyleSignature(color: Color, topMargin: CGFloat, bottomMargin: CGFloat) -> Int {
+            let nsColor = NSColor(color).usingColorSpace(.deviceRGB) ?? NSColor(color)
+            var red: CGFloat = 0
+            var green: CGFloat = 0
+            var blue: CGFloat = 0
+            var alpha: CGFloat = 0
+            nsColor.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+
+            var hasher = Hasher()
+            hasher.combine(Int((Double(red) * 1000).rounded()))
+            hasher.combine(Int((Double(green) * 1000).rounded()))
+            hasher.combine(Int((Double(blue) * 1000).rounded()))
+            hasher.combine(Int((Double(alpha) * 1000).rounded()))
+            hasher.combine(Int((Double(topMargin) * 10).rounded()))
+            hasher.combine(Int((Double(bottomMargin) * 10).rounded()))
+            return hasher.finalize()
+        }
     }
 }
 
@@ -1606,12 +1724,16 @@ private func makeAttributedText(
     from plainText: String,
     imagesByKey: [String: Data],
     searchQuery: String,
+    dividerColor: NSColor,
+    dividerTopMargin: CGFloat,
+    dividerBottomMargin: CGFloat,
+    contentWidth: CGFloat,
     defaultImageWidth: CGFloat,
     fontSize: CGFloat
 ) -> NSAttributedString {
     let output = NSMutableAttributedString()
 
-    let combinedPattern = "\(imageRefPattern)|\(styleTokenPattern)"
+    let combinedPattern = "\(imageRefPattern)|\(styleTokenPattern)|\(dividerLinePattern)"
     guard let regex = try? NSRegularExpression(pattern: combinedPattern) else {
         output.append(NSAttributedString(string: plainText, attributes: editorBaseAttributes(fontSize: fontSize)))
         return output
@@ -1664,7 +1786,16 @@ private func makeAttributedText(
             }
         } else {
             let token = String(plainText[matchRange])
-            if token == boldStyleOpenToken {
+            if token.trimmingCharacters(in: .whitespacesAndNewlines) == "---" {
+                output.append(
+                    makeDividerAttachment(
+                        color: dividerColor,
+                        topMargin: dividerTopMargin,
+                        bottomMargin: dividerBottomMargin,
+                        contentWidth: contentWidth
+                    )
+                )
+            } else if token == boldStyleOpenToken {
                 boldDepth += 1
             } else if token == boldStyleCloseToken {
                 boldDepth = max(0, boldDepth - 1)
@@ -1692,6 +1823,37 @@ private func makeAttributedText(
 
     _ = searchQuery
 
+    return output
+}
+
+private func makeDividerAttachment(
+    color: NSColor,
+    topMargin: CGFloat,
+    bottomMargin: CGFloat,
+    contentWidth: CGFloat
+) -> NSAttributedString {
+    let safeTop = max(0, topMargin)
+    let safeBottom = max(0, bottomMargin)
+    let totalHeight = max(1, safeTop + dividerLineThickness + safeBottom)
+    let lineWidth = max(40, contentWidth - 6)
+    let image = NSImage(size: NSSize(width: lineWidth, height: totalHeight))
+
+    image.lockFocus()
+    NSColor.clear.setFill()
+    NSRect(origin: .zero, size: image.size).fill()
+
+    let y = safeBottom + max(0, (totalHeight - safeTop - safeBottom - dividerLineThickness) / 2)
+    let lineRect = NSRect(x: 0, y: y, width: lineWidth, height: dividerLineThickness)
+    color.withAlphaComponent(0.95).setFill()
+    NSBezierPath(roundedRect: lineRect, xRadius: dividerLineThickness / 2, yRadius: dividerLineThickness / 2).fill()
+    image.unlockFocus()
+
+    let attachment = NSTextAttachment()
+    attachment.image = image
+    attachment.bounds = NSRect(origin: .zero, size: image.size)
+
+    let output = NSMutableAttributedString(attachment: attachment)
+    output.addAttribute(dividerMarkerAttribute, value: true, range: NSRange(location: 0, length: output.length))
     return output
 }
 
@@ -1797,6 +1959,10 @@ private func makePlainText(
             } else {
                 output += "![image](alfred://image/\(key))"
             }
+            return
+        }
+        if let isDivider = attrs[dividerMarkerAttribute] as? Bool, isDivider {
+            output += "---"
             return
         }
 

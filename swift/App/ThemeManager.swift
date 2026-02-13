@@ -721,6 +721,9 @@ final class ThemeManager: ObservableObject {
         let customColors: ThemeColorsData
         let fontSizes: [String: Double]
         let editorSearchHighlightsEnabled: Bool?
+        let editorDividerColor: ColorComponents?
+        let editorDividerTopMargin: Double?
+        let editorDividerBottomMargin: Double?
     }
     
     @Published var currentTheme: AppTheme
@@ -762,6 +765,27 @@ final class ThemeManager: ObservableObject {
             }
         }
     }
+    @Published var editorDividerColor: Color {
+        didSet {
+            if !isApplyingPersistedState {
+                persistAllThemeSettings()
+            }
+        }
+    }
+    @Published var editorDividerTopMargin: CGFloat {
+        didSet {
+            if !isApplyingPersistedState {
+                persistAllThemeSettings()
+            }
+        }
+    }
+    @Published var editorDividerBottomMargin: CGFloat {
+        didSet {
+            if !isApplyingPersistedState {
+                persistAllThemeSettings()
+            }
+        }
+    }
 
     private var isApplyingPersistedState = false
     
@@ -782,6 +806,9 @@ final class ThemeManager: ObservableObject {
         itemSubtitleFontSize = CGFloat(loadedFontSizes["itemSubtitle"] ?? 12)
         editorFontSize = CGFloat(loadedFontSizes["editor"] ?? 15)
         editorSearchHighlightsEnabled = persisted?.editorSearchHighlightsEnabled ?? true
+        editorDividerColor = persisted?.editorDividerColor?.color ?? Color(red: 0.72, green: 0.86, blue: 0.98)
+        editorDividerTopMargin = max(0, CGFloat(persisted?.editorDividerTopMargin ?? 6))
+        editorDividerBottomMargin = max(0, CGFloat(persisted?.editorDividerBottomMargin ?? 6))
 
         if persisted == nil {
             persistAllThemeSettings()
@@ -856,12 +883,21 @@ final class ThemeManager: ObservableObject {
         itemSubtitleFontSize = CGFloat(persisted.fontSizes["itemSubtitle"] ?? 12)
         editorFontSize = CGFloat(persisted.fontSizes["editor"] ?? 15)
         editorSearchHighlightsEnabled = persisted.editorSearchHighlightsEnabled ?? true
+        editorDividerColor = persisted.editorDividerColor?.color ?? Color(red: 0.72, green: 0.86, blue: 0.98)
+        editorDividerTopMargin = max(0, CGFloat(persisted.editorDividerTopMargin ?? 6))
+        editorDividerBottomMargin = max(0, CGFloat(persisted.editorDividerBottomMargin ?? 6))
 
         NotificationCenter.default.post(name: Self.themeChangedNotification, object: nil)
     }
 
     func toggleEditorSearchHighlightsEnabled() {
         editorSearchHighlightsEnabled.toggle()
+    }
+
+    func resetEditorDividerStyle() {
+        editorDividerColor = Color(red: 0.72, green: 0.86, blue: 0.98)
+        editorDividerTopMargin = 6
+        editorDividerBottomMargin = 6
     }
     
     func saveThemePreference() {
@@ -901,7 +937,10 @@ final class ThemeManager: ObservableObject {
                 "itemSubtitle": Double(itemSubtitleFontSize),
                 "editor": Double(editorFontSize)
             ],
-            editorSearchHighlightsEnabled: editorSearchHighlightsEnabled
+            editorSearchHighlightsEnabled: editorSearchHighlightsEnabled,
+            editorDividerColor: ColorComponents(color: editorDividerColor),
+            editorDividerTopMargin: Double(editorDividerTopMargin),
+            editorDividerBottomMargin: Double(editorDividerBottomMargin)
         )
         _ = SettingsStore.shared.saveJSON(settings, fileName: Self.settingsFileName)
     }
@@ -945,7 +984,10 @@ final class ThemeManager: ObservableObject {
             selectedThemeId: legacyThemeId ?? AppTheme.default.id,
             customColors: loadedColors,
             fontSizes: fontSizes,
-            editorSearchHighlightsEnabled: true
+            editorSearchHighlightsEnabled: true,
+            editorDividerColor: ColorComponents(color: Color(red: 0.72, green: 0.86, blue: 0.98)),
+            editorDividerTopMargin: 6,
+            editorDividerBottomMargin: 6
         )
         _ = SettingsStore.shared.saveJSON(migrated, fileName: settingsFileName)
         return migrated
