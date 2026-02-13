@@ -711,83 +711,81 @@ extension AppTheme {
 final class ThemeManager: ObservableObject {
     static let shared = ThemeManager()
     static let themeChangedNotification = Notification.Name("ThemeManager.themeChanged")
-    static let customColorsKey = "customThemeColors"
-    static let fontSizesKey = "customFontSizes"
-    
-    private let selectedThemeKey = "selectedThemeId"
+    private static let settingsFileName = "theme-settings.json"
+    private static let legacyCustomColorsKey = "customThemeColors"
+    private static let legacyFontSizesKey = "customFontSizes"
+    private static let legacySelectedThemeKey = "selectedThemeId"
+
+    private struct PersistedThemeSettings: Codable {
+        let selectedThemeId: String
+        let customColors: ThemeColorsData
+        let fontSizes: [String: Double]
+        let editorSearchHighlightsEnabled: Bool?
+    }
     
     @Published var currentTheme: AppTheme
     @Published var customColors: ThemeColors
     
     // Font sizes
     @Published var searchFieldFontSize: CGFloat {
-        didSet { saveFontSizes() }
+        didSet {
+            if !isApplyingPersistedState {
+                saveFontSizes()
+            }
+        }
     }
     @Published var itemTitleFontSize: CGFloat {
-        didSet { saveFontSizes() }
+        didSet {
+            if !isApplyingPersistedState {
+                saveFontSizes()
+            }
+        }
     }
     @Published var itemSubtitleFontSize: CGFloat {
-        didSet { saveFontSizes() }
+        didSet {
+            if !isApplyingPersistedState {
+                saveFontSizes()
+            }
+        }
     }
     @Published var editorFontSize: CGFloat {
-        didSet { saveFontSizes() }
+        didSet {
+            if !isApplyingPersistedState {
+                saveFontSizes()
+            }
+        }
     }
+    @Published var editorSearchHighlightsEnabled: Bool {
+        didSet {
+            if !isApplyingPersistedState {
+                persistAllThemeSettings()
+            }
+        }
+    }
+
+    private var isApplyingPersistedState = false
     
     var colors: ThemeColors {
         currentTheme.isCustom ? customColors : currentTheme.colors
     }
     
     private init() {
-        // Load custom colors first
-        let loadedColors: ThemeColors
-        if let data = UserDefaults.standard.data(forKey: ThemeManager.customColorsKey) {
-            do {
-                let decoded = try JSONDecoder().decode(ThemeColorsData.self, from: data)
-                loadedColors = decoded.colors
-                print("[ThemeManager] Loaded custom colors from UserDefaults")
-            } catch {
-                print("[ThemeManager] Failed to decode custom colors: \(error)")
-                loadedColors = AppTheme.defaultCustomColors
-            }
-        } else {
-            print("[ThemeManager] No saved custom colors found, using defaults")
-            loadedColors = AppTheme.defaultCustomColors
-        }
-        
-        // Load selected theme
-        let savedId = UserDefaults.standard.string(forKey: selectedThemeKey)
-        let loadedTheme: AppTheme
-        if let savedId = savedId {
-            if savedId == "custom" {
-                loadedTheme = AppTheme(
-                    id: "custom",
-                    name: "Custom",
-                    colors: loadedColors,
-                    isCustom: true
-                )
-                print("[ThemeManager] Loaded custom theme")
-            } else if let theme = AppTheme.allThemes.first(where: { $0.id == savedId }) {
-                loadedTheme = theme
-                print("[ThemeManager] Loaded theme: \(savedId)")
-            } else {
-                loadedTheme = .default
-                print("[ThemeManager] Unknown theme id, using default")
-            }
-        } else {
-            loadedTheme = .default
-            print("[ThemeManager] No saved theme, using default")
-        }
-        
-        // Initialize stored properties
+        let persisted = Self.loadPersistedSettings()
+        let loadedColors = persisted?.customColors.colors ?? AppTheme.defaultCustomColors
+        let loadedTheme = Self.themeForID(persisted?.selectedThemeId, customColors: loadedColors)
+        let loadedFontSizes = persisted?.fontSizes ?? [:]
+
         currentTheme = loadedTheme
         customColors = loadedColors
-        
-        // Load font sizes
-        let fontSizes = UserDefaults.standard.dictionary(forKey: ThemeManager.fontSizesKey) as? [String: CGFloat]
-        searchFieldFontSize = fontSizes?["searchField"] ?? 30
-        itemTitleFontSize = fontSizes?["itemTitle"] ?? 20
-        itemSubtitleFontSize = fontSizes?["itemSubtitle"] ?? 12
-        editorFontSize = fontSizes?["editor"] ?? 15
+        searchFieldFontSize = CGFloat(loadedFontSizes["searchField"] ?? 30)
+        itemTitleFontSize = CGFloat(loadedFontSizes["itemTitle"] ?? 20)
+        itemSubtitleFontSize = CGFloat(loadedFontSizes["itemSubtitle"] ?? 12)
+        editorFontSize = CGFloat(loadedFontSizes["editor"] ?? 15)
+        editorSearchHighlightsEnabled = persisted?.editorSearchHighlightsEnabled ?? true
+
+        if persisted == nil {
+            persistAllThemeSettings()
+        }
     }
     
     func updateCustomColors(_ newColors: ThemeColors) {
@@ -841,34 +839,41 @@ final class ThemeManager: ObservableObject {
         updatedColors[keyPath: keyPath] = color
         updateCustomColors(updatedColors)
     }
+
+    func reloadFromDisk() {
+        guard let persisted = Self.loadPersistedSettings() else {
+            return
+        }
+
+        isApplyingPersistedState = true
+        defer { isApplyingPersistedState = false }
+
+        let loadedColors = persisted.customColors.colors
+        customColors = loadedColors
+        currentTheme = Self.themeForID(persisted.selectedThemeId, customColors: loadedColors)
+        searchFieldFontSize = CGFloat(persisted.fontSizes["searchField"] ?? 30)
+        itemTitleFontSize = CGFloat(persisted.fontSizes["itemTitle"] ?? 20)
+        itemSubtitleFontSize = CGFloat(persisted.fontSizes["itemSubtitle"] ?? 12)
+        editorFontSize = CGFloat(persisted.fontSizes["editor"] ?? 15)
+        editorSearchHighlightsEnabled = persisted.editorSearchHighlightsEnabled ?? true
+
+        NotificationCenter.default.post(name: Self.themeChangedNotification, object: nil)
+    }
+
+    func toggleEditorSearchHighlightsEnabled() {
+        editorSearchHighlightsEnabled.toggle()
+    }
     
     func saveThemePreference() {
-        UserDefaults.standard.set(currentTheme.id, forKey: selectedThemeKey)
-        UserDefaults.standard.synchronize()
-        print("[ThemeManager] Saved theme preference: \(currentTheme.id)")
+        persistAllThemeSettings()
     }
     
     func saveCustomColors() {
-        let data = ThemeColorsData(colors: customColors)
-        do {
-            let encoded = try JSONEncoder().encode(data)
-            UserDefaults.standard.set(encoded, forKey: ThemeManager.customColorsKey)
-            UserDefaults.standard.synchronize()
-            print("[ThemeManager] Saved custom colors")
-        } catch {
-            print("[ThemeManager] Failed to encode custom colors: \(error)")
-        }
+        persistAllThemeSettings()
     }
     
     func saveFontSizes() {
-        let fontSizes: [String: CGFloat] = [
-            "searchField": searchFieldFontSize,
-            "itemTitle": itemTitleFontSize,
-            "itemSubtitle": itemSubtitleFontSize,
-            "editor": editorFontSize
-        ]
-        UserDefaults.standard.set(fontSizes, forKey: ThemeManager.fontSizesKey)
-        UserDefaults.standard.synchronize()
+        persistAllThemeSettings()
     }
     
     func resetFontSizes() {
@@ -884,6 +889,97 @@ final class ThemeManager: ObservableObject {
     
     func decreaseEditorFontSize() {
         editorFontSize = max(editorFontSize - 1, 12)
+    }
+
+    private func persistAllThemeSettings() {
+        let settings = PersistedThemeSettings(
+            selectedThemeId: currentTheme.id,
+            customColors: ThemeColorsData(colors: customColors),
+            fontSizes: [
+                "searchField": Double(searchFieldFontSize),
+                "itemTitle": Double(itemTitleFontSize),
+                "itemSubtitle": Double(itemSubtitleFontSize),
+                "editor": Double(editorFontSize)
+            ],
+            editorSearchHighlightsEnabled: editorSearchHighlightsEnabled
+        )
+        _ = SettingsStore.shared.saveJSON(settings, fileName: Self.settingsFileName)
+    }
+
+    private static func loadPersistedSettings() -> PersistedThemeSettings? {
+        if let persisted: PersistedThemeSettings = SettingsStore.shared.loadJSON(
+            PersistedThemeSettings.self,
+            fileName: settingsFileName
+        ) {
+            return persisted
+        }
+        return migrateLegacyUserDefaultsIfNeeded()
+    }
+
+    private static func migrateLegacyUserDefaultsIfNeeded() -> PersistedThemeSettings? {
+        let defaults = UserDefaults.standard
+        let legacyThemeId = defaults.string(forKey: legacySelectedThemeKey)
+        let legacyColorsData = defaults.data(forKey: legacyCustomColorsKey)
+        let legacyFontSizes = defaults.dictionary(forKey: legacyFontSizesKey)
+
+        guard legacyThemeId != nil || legacyColorsData != nil || legacyFontSizes != nil else {
+            return nil
+        }
+
+        let loadedColors: ThemeColorsData
+        if let legacyColorsData {
+            loadedColors = (try? JSONDecoder().decode(ThemeColorsData.self, from: legacyColorsData))
+                ?? ThemeColorsData(colors: AppTheme.defaultCustomColors)
+        } else {
+            loadedColors = ThemeColorsData(colors: AppTheme.defaultCustomColors)
+        }
+
+        let fontSizes: [String: Double] = [
+            "searchField": numericValue(from: legacyFontSizes?["searchField"]) ?? 30,
+            "itemTitle": numericValue(from: legacyFontSizes?["itemTitle"]) ?? 20,
+            "itemSubtitle": numericValue(from: legacyFontSizes?["itemSubtitle"]) ?? 12,
+            "editor": numericValue(from: legacyFontSizes?["editor"]) ?? 15
+        ]
+
+        let migrated = PersistedThemeSettings(
+            selectedThemeId: legacyThemeId ?? AppTheme.default.id,
+            customColors: loadedColors,
+            fontSizes: fontSizes,
+            editorSearchHighlightsEnabled: true
+        )
+        _ = SettingsStore.shared.saveJSON(migrated, fileName: settingsFileName)
+        return migrated
+    }
+
+    private static func themeForID(_ id: String?, customColors: ThemeColors) -> AppTheme {
+        guard let id else {
+            return .default
+        }
+
+        if id == "custom" {
+            return AppTheme(id: "custom", name: "Custom", colors: customColors, isCustom: true)
+        }
+
+        return AppTheme.allThemes.first(where: { $0.id == id }) ?? .default
+    }
+
+    private static func numericValue(from value: Any?) -> Double? {
+        if let number = value as? NSNumber {
+            return number.doubleValue
+        }
+        if let value = value as? Double {
+            return value
+        }
+        if let value = value as? CGFloat {
+            return Double(value)
+        }
+        if let value = value as? Float {
+            return Double(value)
+        }
+        if let value = value as? Int {
+            return Double(value)
+        }
+        return nil
     }
 }
 

@@ -11,7 +11,7 @@ private let launcherShellPadding: CGFloat = 14
 private let launcherResultsCornerRadius: CGFloat = launcherShellCornerRadius - launcherShellPadding
 private let keyHandlingModifierMask: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
 private let actionMenuRowHeight: CGFloat = 44
-private let editorDocumentFontSizesDefaultsKey = "editorDocumentFontSizes"
+private let editorDocumentFontSizesFileName = "editor-document-font-sizes.json"
 private let editorDocumentMinFontSize: CGFloat = 11
 private let editorDocumentMaxFontSize: CGFloat = 40
 private let editorDocumentFontSizeStep: CGFloat = 1
@@ -26,6 +26,7 @@ private struct LauncherShellHeightPreferenceKey: PreferenceKey {
 
 private enum ItemAction: Int, CaseIterable {
     case openEditor
+    case rename
     case showJsonInFinder
     case copyTitle
     case openSettings
@@ -34,6 +35,7 @@ private enum ItemAction: Int, CaseIterable {
     var label: String {
         switch self {
         case .openEditor: return "Open in Editor"
+        case .rename: return "Rename"
         case .showJsonInFinder: return "Show JSON in Finder"
         case .copyTitle: return "Copy Title"
         case .openSettings: return "Settings"
@@ -44,6 +46,7 @@ private enum ItemAction: Int, CaseIterable {
     var systemImage: String {
         switch self {
         case .openEditor: return "doc.text"
+        case .rename: return "pencil"
         case .showJsonInFinder: return "folder"
         case .copyTitle: return "doc.on.doc"
         case .openSettings: return "gear"
@@ -58,6 +61,15 @@ private enum ItemAction: Int, CaseIterable {
     var isSeparatorBefore: Bool {
         self == .openSettings || self == .delete
     }
+
+    var requiresItemTarget: Bool {
+        switch self {
+        case .openSettings:
+            return false
+        default:
+            return true
+        }
+    }
 }
 
 struct ContentView: View {
@@ -68,6 +80,7 @@ struct ContentView: View {
     @State private var selectedIndex = 0
     @State private var measuredShellHeight: CGFloat = launcherEmptyHeight
     @State private var resultsScrollProxy: ScrollViewProxy?
+    @State private var isActionMenuVisible = false
     @State private var actionMenuTarget: SearchResultRecord?
     @State private var actionMenuSelectedIndex = 0
     @State private var actionMenuFilter = ""
@@ -75,11 +88,14 @@ struct ContentView: View {
     @State private var isScrolling = false
 
     private var filteredActions: [ItemAction] {
+        let baseActions = ItemAction.allCases.filter { action in
+            actionMenuTarget != nil ? action.requiresItemTarget || action == .openSettings : !action.requiresItemTarget
+        }
         let filter = actionMenuFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !filter.isEmpty else {
-            return ItemAction.allCases
+            return baseActions
         }
-        return ItemAction.allCases.filter { $0.label.lowercased().contains(filter) }
+        return baseActions.filter { $0.label.lowercased().contains(filter) }
     }
 
     private var resultsViewportHeight: CGFloat {
@@ -123,7 +139,7 @@ struct ContentView: View {
             searchFieldFocused = true
         }
         .onChange(of: viewModel.query) { _, _ in
-            if actionMenuTarget == nil {
+            if !isActionMenuVisible {
                 if selectedIndex != 0 {
                     selectedIndex = 0
                 }
@@ -157,9 +173,9 @@ struct ContentView: View {
     
     private var searchFieldBinding: Binding<String> {
         Binding(
-            get: { actionMenuTarget != nil ? actionMenuFilter : viewModel.query },
+            get: { isActionMenuVisible ? actionMenuFilter : viewModel.query },
             set: { newValue in
-                if actionMenuTarget != nil {
+                if isActionMenuVisible {
                     actionMenuFilter = newValue
                 } else {
                     viewModel.query = newValue
@@ -169,7 +185,7 @@ struct ContentView: View {
     }
     
     private var searchFieldPlaceholder: String {
-        actionMenuTarget != nil ? "Filter actions..." : "Type to search..."
+        isActionMenuVisible ? "Filter actions..." : "Type to search..."
     }
     
     private func searchFieldView() -> some View {
@@ -193,10 +209,10 @@ struct ContentView: View {
     }
     
     private func handleSearchSubmit() {
-        if let target = actionMenuTarget {
+        if isActionMenuVisible {
             let actions = filteredActions
             if actions.indices.contains(actionMenuSelectedIndex) {
-                executeAction(actions[actionMenuSelectedIndex], on: target)
+                executeAction(actions[actionMenuSelectedIndex], on: actionMenuTarget)
             }
         } else if !viewModel.results.isEmpty {
             // Only open existing items with Enter (not create new)
@@ -207,8 +223,8 @@ struct ContentView: View {
     
     @ViewBuilder
     private func resultsContentView(showResults: Bool) -> some View {
-        if let target = actionMenuTarget {
-            actionMenuView(for: target)
+        if isActionMenuVisible {
+            actionMenuView(for: actionMenuTarget)
         } else if showResults {
             ResultsListView(
                 results: viewModel.results,
@@ -231,7 +247,7 @@ struct ContentView: View {
         let colors = themeManager.colors
         let trimmedQuery = viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines)
         let showResults = !trimmedQuery.isEmpty
-        let hasContent = showResults || actionMenuTarget != nil
+        let hasContent = showResults || isActionMenuVisible
         
         return VStack(alignment: .leading, spacing: 0) {
             searchFieldView()
@@ -332,35 +348,47 @@ struct ContentView: View {
     }
 
     private func handleCmdTap() {
-        if actionMenuTarget != nil {
+        if isActionMenuVisible {
             dismissActionMenu()
             return
         }
 
-        guard viewModel.results.indices.contains(selectedIndex) else {
+        if viewModel.results.indices.contains(selectedIndex) {
+            actionMenuTarget = viewModel.results[selectedIndex]
+            isActionMenuVisible = true
+            actionMenuSelectedIndex = 0
+            actionMenuFilter = ""
+            searchFieldFocused = true
             return
         }
 
-        actionMenuTarget = viewModel.results[selectedIndex]
+        let trimmedQuery = viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedQuery.isEmpty else {
+            return
+        }
+
+        actionMenuTarget = nil
+        isActionMenuVisible = true
         actionMenuSelectedIndex = 0
         actionMenuFilter = ""
         searchFieldFocused = true
     }
 
     private func dismissActionMenu() {
+        isActionMenuVisible = false
         actionMenuTarget = nil
         actionMenuSelectedIndex = 0
         actionMenuFilter = ""
         searchFieldFocused = true
     }
 
-    private func actionMenuView(for target: SearchResultRecord) -> some View {
+    private func actionMenuView(for target: SearchResultRecord?) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "ellipsis.circle.fill")
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(themeManager.colors.itemSubtitleText)
-                Text(target.title)
+                Text(target?.title ?? "Actions")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(themeManager.colors.actionMenuHeaderText)
                     .lineLimit(1)
@@ -423,26 +451,40 @@ struct ContentView: View {
         }
     }
 
-    private func executeAction(_ action: ItemAction, on target: SearchResultRecord) {
-        actionMenuTarget = nil
-        actionMenuSelectedIndex = 0
-        actionMenuFilter = ""
-        searchFieldFocused = true
+    private func executeAction(_ action: ItemAction, on target: SearchResultRecord?) {
+        dismissActionMenu()
 
         switch action {
         case .openEditor:
-            if let idx = viewModel.results.firstIndex(where: { $0.id == target.id }) {
-                selectedIndex = idx
-                activateResult(at: idx)
+            guard let target else { return }
+            Task {
+                let opened = await viewModel.open(itemId: target.id)
+                if opened {
+                    viewModel.beginEditorPresentation()
+                    openWindow(id: "editor")
+                }
+            }
+        case .rename:
+            guard let target else { return }
+            Task {
+                let opened = await viewModel.open(itemId: target.id)
+                if opened {
+                    viewModel.requestEditorTitleFocus()
+                    viewModel.beginEditorPresentation()
+                    openWindow(id: "editor")
+                }
             }
         case .showJsonInFinder:
+            guard let target else { return }
             viewModel.revealItemJsonInFinder(itemId: target.id)
         case .copyTitle:
+            guard let target else { return }
             viewModel.copyItemTitle(target.title)
         case .openSettings:
             viewModel.prepareSettings()
             openWindow(id: "settings")
         case .delete:
+            guard let target else { return }
             Task {
                 await viewModel.deleteItem(itemId: target.id)
             }
@@ -469,7 +511,7 @@ struct ContentView: View {
         let modifiers = event.modifierFlags.intersection(keyHandlingModifierMask)
 
         // Handle action menu key events
-        if actionMenuTarget != nil {
+        if isActionMenuVisible {
             if !modifiers.isEmpty {
                 return false
             }
@@ -486,11 +528,9 @@ struct ContentView: View {
                 }
                 return true
             case 36, 76: // return / enter
-                if let target = actionMenuTarget {
-                    let actions = filteredActions
-                    if actions.indices.contains(actionMenuSelectedIndex) {
-                        executeAction(actions[actionMenuSelectedIndex], on: target)
-                    }
+                let actions = filteredActions
+                if actions.indices.contains(actionMenuSelectedIndex) {
+                    executeAction(actions[actionMenuSelectedIndex], on: actionMenuTarget)
                 }
                 return true
             case 53: // escape
@@ -987,6 +1027,7 @@ struct SettingsWindowView: View {
         )
         .onAppear {
             viewModel.loadSettingsStorageDirectoryPath()
+            viewModel.reloadSettingsFromDisk()
             viewModel.settingsDidOpen()
         }
         .onDisappear {
@@ -1756,24 +1797,37 @@ private struct ThemeCard: View {
     }
 }
 
+private struct EditorDocumentFontSizeSettings: Codable {
+    var fontSizes: [String: Double]
+}
+
 private struct EditorSheet: View {
     @ObservedObject var viewModel: LauncherViewModel
     @EnvironmentObject var themeManager: ThemeManager
     @Environment(\.dismissWindow) private var dismissWindow
+    @FocusState private var titleFieldFocused: Bool
     @State private var editorCursorCharIndex: Int?
     @State private var isClosingEditor = false
     @State private var documentFontSize: CGFloat = 15
+    @State private var draftTitle: String = ""
+    @State private var titleSaveTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(viewModel.selectedItem?.title ?? "Editor")
+            TextField("Title", text: $draftTitle)
+                .textFieldStyle(.plain)
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(themeManager.colors.itemTitleText)
+                .focused($titleFieldFocused)
+                .onSubmit {
+                    scheduleTitleSave(immediate: true)
+                }
 
             InlineImageTextEditor(
                 text: $viewModel.editorText,
                 imagesByKey: Dictionary(uniqueKeysWithValues: (viewModel.selectedItem?.images ?? []).map { ($0.imageKey, $0.bytes) }),
                 searchQuery: viewModel.query,
+                highlightSearchMatches: themeManager.editorSearchHighlightsEnabled,
                 defaultImageWidth: 360,
                 fontSize: documentFontSize,
                 onIncreaseDocumentFontSize: {
@@ -1795,6 +1849,8 @@ private struct EditorSheet: View {
         .background(
             KeyEventMonitor { event in
                 handleEditorKeyEvent(event)
+            } onOptionDoubleTap: {
+                themeManager.toggleEditorSearchHighlightsEnabled()
             }
         )
         .onChange(of: viewModel.editorText) { _, _ in
@@ -1803,18 +1859,41 @@ private struct EditorSheet: View {
         .onAppear {
             isClosingEditor = false
             refreshDocumentFontSize()
+            refreshDraftTitle()
+            if viewModel.consumeEditorTitleFocusRequest() {
+                titleFieldFocused = true
+            }
         }
         .onChange(of: viewModel.selectedItem?.id) { _, _ in
             refreshDocumentFontSize()
+            refreshDraftTitle()
+        }
+        .onChange(of: viewModel.selectedItem?.title) { _, newValue in
+            guard !titleFieldFocused else {
+                return
+            }
+            draftTitle = newValue ?? ""
+        }
+        .onChange(of: draftTitle) { _, _ in
+            scheduleTitleSave(immediate: false)
+        }
+        .onChange(of: viewModel.editorTitleFocusRequestID) { _, _ in
+            if viewModel.consumeEditorTitleFocusRequest() {
+                titleFieldFocused = true
+            }
         }
         .onChange(of: documentFontSize) { _, newValue in
             persistDocumentFontSize(newValue)
         }
         .onDisappear {
+            titleSaveTask?.cancel()
             if isClosingEditor {
                 return
             }
-            Task { await viewModel.flushAutosave() }
+            Task {
+                await commitTitleIfNeeded()
+                await viewModel.flushAutosave()
+            }
         }
         .onExitCommand {
             closeEditorWindow()
@@ -1853,9 +1932,63 @@ private struct EditorSheet: View {
 
         isClosingEditor = true
         Task { @MainActor in
+            titleSaveTask?.cancel()
+            await commitTitleIfNeeded()
             dismissWindow(id: "editor")
             _ = await viewModel.flushAutosave()
         }
+    }
+
+    private func refreshDraftTitle() {
+        draftTitle = viewModel.selectedItem?.title ?? ""
+    }
+
+    private func scheduleTitleSave(immediate: Bool) {
+        titleSaveTask?.cancel()
+
+        if immediate {
+            titleSaveTask = Task { @MainActor in
+                await commitTitleIfNeeded()
+            }
+            return
+        }
+
+        titleSaveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            await commitTitleIfNeeded()
+        }
+    }
+
+    private func commitTitleIfNeeded() async {
+        guard let currentTitle = viewModel.selectedItem?.title else {
+            return
+        }
+
+        let trimmed = draftTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            if draftTitle != currentTitle {
+                draftTitle = currentTitle
+            }
+            return
+        }
+
+        guard trimmed != currentTitle else {
+            if draftTitle != trimmed {
+                draftTitle = trimmed
+            }
+            return
+        }
+
+        let previous = currentTitle
+        let success = await viewModel.renameCurrentItem(to: trimmed)
+        if !success {
+            draftTitle = previous
+            return
+        }
+        draftTitle = viewModel.selectedItem?.title ?? trimmed
     }
 
     private func refreshDocumentFontSize() {
@@ -1868,11 +2001,13 @@ private struct EditorSheet: View {
     }
 
     private func loadDocumentFontSize(itemId: Int64) -> CGFloat? {
-        let raw = UserDefaults.standard.dictionary(forKey: editorDocumentFontSizesDefaultsKey) ?? [:]
-        guard let value = raw[String(itemId)] as? NSNumber else {
+        guard let persisted: EditorDocumentFontSizeSettings = SettingsStore.shared.loadJSON(
+            EditorDocumentFontSizeSettings.self,
+            fileName: editorDocumentFontSizesFileName
+        ), let value = persisted.fontSizes[String(itemId)] else {
             return nil
         }
-        let parsed = CGFloat(value.doubleValue)
+        let parsed = CGFloat(value)
         guard parsed.isFinite else {
             return nil
         }
@@ -1884,8 +2019,11 @@ private struct EditorSheet: View {
             return
         }
 
-        var raw = UserDefaults.standard.dictionary(forKey: editorDocumentFontSizesDefaultsKey) ?? [:]
-        raw[String(itemId)] = Double(fontSize)
-        UserDefaults.standard.set(raw, forKey: editorDocumentFontSizesDefaultsKey)
+        var persisted: EditorDocumentFontSizeSettings = SettingsStore.shared.loadJSON(
+            EditorDocumentFontSizeSettings.self,
+            fileName: editorDocumentFontSizesFileName
+        ) ?? EditorDocumentFontSizeSettings(fontSizes: [:])
+        persisted.fontSizes[String(itemId)] = Double(fontSize)
+        _ = SettingsStore.shared.saveJSON(persisted, fileName: editorDocumentFontSizesFileName)
     }
 }

@@ -295,6 +295,11 @@ RustBuffer uniffi_alfred_alt_fn_func_load_json_storage_path(RustCallStatus *_Non
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_RENAME_ITEM
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_RENAME_ITEM
+void uniffi_alfred_alt_fn_func_rename_item(int64_t item_id, RustBuffer title, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SAVE_HOTKEY
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SAVE_HOTKEY
 void uniffi_alfred_alt_fn_func_save_hotkey(RustBuffer hotkey, RustCallStatus *_Nonnull out_status
@@ -640,6 +645,12 @@ uint16_t uniffi_alfred_alt_checksum_func_load_hotkey(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LOAD_JSON_STORAGE_PATH
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LOAD_JSON_STORAGE_PATH
 uint16_t uniffi_alfred_alt_checksum_func_load_json_storage_path(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_RENAME_ITEM
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_RENAME_ITEM
+uint16_t uniffi_alfred_alt_checksum_func_rename_item(void
     
 );
 #endif

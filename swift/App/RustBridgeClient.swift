@@ -21,6 +21,10 @@ enum RustBridgeClient {
         try saveItem(itemId: itemId, note: note, images: images)
     }
 
+    static func rename(itemId: Int64, title: String) throws {
+        try renameItem(itemId: itemId, title: title)
+    }
+
     static func loadJsonStorageDirectoryPath() throws -> String {
         try loadJsonStoragePath()
     }

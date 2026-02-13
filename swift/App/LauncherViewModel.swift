@@ -44,6 +44,7 @@ final class LauncherViewModel: ObservableObject {
     @Published private(set) var isEditorPresented: Bool = false
     @Published private(set) var isSettingsPresented: Bool = false
     @Published private(set) var launcherFocusRequestID: UInt64 = 0
+    @Published private(set) var editorTitleFocusRequestID: UInt64 = 0
     @Published var settingsStorageDirectoryPath: String = ""
     @Published var settingsErrorMessage: String?
     @Published var settingsSuccessMessage: String?
@@ -52,6 +53,7 @@ final class LauncherViewModel: ObservableObject {
     private var isSearchWorkerRunning = false
     private var autosaveTask: Task<Void, Never>?
     private var editorStateRevision: UInt64 = 0
+    private var consumedEditorTitleFocusRequestID: UInt64 = 0
     private weak var launcherWindow: NSWindow?
     private weak var editorWindow: NSWindow?
     private weak var settingsWindow: NSWindow?
@@ -82,6 +84,18 @@ final class LauncherViewModel: ObservableObject {
         settingsWindow = window
     }
 
+    func requestEditorTitleFocus() {
+        editorTitleFocusRequestID &+= 1
+    }
+
+    func consumeEditorTitleFocusRequest() -> Bool {
+        guard consumedEditorTitleFocusRequestID != editorTitleFocusRequestID else {
+            return false
+        }
+        consumedEditorTitleFocusRequestID = editorTitleFocusRequestID
+        return true
+    }
+
     func beginEditorPresentation() {
         isEditorPresented = true
         launcherWindow?.orderOut(nil)
@@ -94,6 +108,7 @@ final class LauncherViewModel: ObservableObject {
         settingsErrorMessage = nil
         settingsSuccessMessage = nil
         loadSettingsStorageDirectoryPath()
+        reloadSettingsFromDisk()
     }
 
     func settingsDidOpen() {
@@ -124,6 +139,11 @@ final class LauncherViewModel: ObservableObject {
         } catch {
             settingsErrorMessage = error.localizedDescription
         }
+    }
+
+    func reloadSettingsFromDisk() {
+        ThemeManager.shared.reloadFromDisk()
+        HotKeyManager.shared.reloadFromDisk()
     }
 
     @discardableResult
@@ -231,6 +251,7 @@ final class LauncherViewModel: ObservableObject {
         }
 
         let saveRevision = editorStateRevision
+        let localTitleAtSaveStart = item.title
         item.note = editorText
         let referenced = referencedImageKeys(in: editorText)
         item.images.removeAll { !referenced.contains($0.imageKey) }
@@ -259,22 +280,71 @@ final class LauncherViewModel: ObservableObject {
                 return true
             }
 
-            if saveRevision == editorStateRevision {
-                // No local edits since save started; safe to apply canonical backend note.
-                selectedItem = refreshed
-                editorText = refreshed.note
-            } else if var current = selectedItem, current.id == refreshed.id {
-                // Preserve local in-flight edits but keep refreshed metadata/images.
-                current.title = refreshed.title
+            if var current = selectedItem, current.id == refreshed.id {
+                // Preserve local title edits while syncing backend note/images.
+                if current.title == localTitleAtSaveStart {
+                    current.title = refreshed.title
+                }
                 current.images = refreshed.images
-                current.note = editorText
-                selectedItem = current
+                if saveRevision == editorStateRevision {
+                    current.note = refreshed.note
+                    selectedItem = current
+                    editorText = refreshed.note
+                } else {
+                    current.note = editorText
+                    selectedItem = current
+                }
             }
 
             errorMessage = nil
             refreshSearchForCurrentQuery()
             return true
         } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func renameCurrentItem(to title: String) async -> Bool {
+        guard var current = selectedItem else {
+            return false
+        }
+
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            errorMessage = "title must not be empty"
+            return false
+        }
+
+        guard trimmed != current.title else {
+            errorMessage = nil
+            return true
+        }
+
+        let previousTitle = current.title
+        current.title = trimmed
+        selectedItem = current
+
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        try RustBridgeClient.rename(itemId: current.id, title: trimmed)
+                        continuation.resume()
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+            errorMessage = nil
+            refreshSearchForCurrentQuery()
+            return true
+        } catch {
+            if var latest = selectedItem, latest.id == current.id, latest.title == trimmed {
+                latest.title = previousTitle
+                selectedItem = latest
+            }
             errorMessage = error.localizedDescription
             return false
         }

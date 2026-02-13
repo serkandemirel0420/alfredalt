@@ -1199,6 +1199,20 @@ pub fn update_item(id: i64, note: &str, images: Option<&[NoteImage]>) -> Result<
     })
 }
 
+pub fn rename_item(id: i64, title: &str) -> Result<()> {
+    run_with_store(|store| {
+        let Some(item) = store.item_by_id_mut(id) else {
+            return Err(anyhow!("item not found: {id}"));
+        };
+
+        item.title = title.to_string();
+        // Keep keyword defaults aligned with title for discoverability.
+        item.keywords = title.to_string();
+
+        store.flush_all()
+    })
+}
+
 pub fn delete_item(id: i64) -> Result<()> {
     run_with_store(|store| {
         if store.data.items.remove(&id).is_none() {

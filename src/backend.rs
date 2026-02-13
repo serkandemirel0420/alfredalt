@@ -202,6 +202,29 @@ pub fn save_item(
     db::update_item(item_id, &sanitized_note, Some(&image_models)).map_err(map_anyhow)
 }
 
+#[uniffi::export]
+pub fn rename_item(item_id: i64, title: String) -> Result<(), BackendError> {
+    ensure_item_id(item_id)?;
+
+    const MAX_TITLE_LENGTH: usize = 10_000; // 10KB limit for title
+    let title = sanitize_title(&title);
+    let title = title.trim();
+
+    if title.is_empty() {
+        return Err(BackendError::Validation(
+            "title must not be empty".to_string(),
+        ));
+    }
+
+    if title.len() > MAX_TITLE_LENGTH {
+        return Err(BackendError::Validation(
+            "title exceeds maximum length".to_string(),
+        ));
+    }
+
+    db::rename_item(item_id, title).map_err(map_anyhow)
+}
+
 /// Sanitize note text by removing problematic characters
 fn sanitize_note_for_storage(note: &str) -> String {
     note.chars()

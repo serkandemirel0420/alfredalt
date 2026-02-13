@@ -4,6 +4,8 @@ import SwiftUI
 struct KeyEventMonitor: NSViewRepresentable {
     let onKeyDown: (NSEvent) -> Bool
     var onCmdTap: (() -> Void)? = nil
+    var onOptionDoubleTap: (() -> Void)? = nil
+    private let optionDoubleTapInterval: TimeInterval = 0.35
 
     final class Coordinator {
         var keyMonitor: Any?
@@ -11,7 +13,11 @@ struct KeyEventMonitor: NSViewRepresentable {
         weak var window: NSWindow?
         var onKeyDown: (NSEvent) -> Bool = { _ in false }
         var onCmdTap: (() -> Void)?
+        var onOptionDoubleTap: (() -> Void)?
         var cmdPressedClean = false
+        var optionPressedClean = false
+        var optionIsDown = false
+        var lastOptionTapAt: Date?
         var isActive = false
     }
 
@@ -23,6 +29,7 @@ struct KeyEventMonitor: NSViewRepresentable {
         let view = NSView(frame: .zero)
         context.coordinator.onKeyDown = onKeyDown
         context.coordinator.onCmdTap = onCmdTap
+        context.coordinator.onOptionDoubleTap = onOptionDoubleTap
         context.coordinator.isActive = true
 
         DispatchQueue.main.async {
@@ -42,6 +49,9 @@ struct KeyEventMonitor: NSViewRepresentable {
             }
             // Any key press while Cmd is held invalidates the Cmd-tap gesture
             coordinator.cmdPressedClean = false
+            if coordinator.optionIsDown {
+                coordinator.optionPressedClean = false
+            }
             return coordinator.onKeyDown(event) ? nil : event
         }
 
@@ -70,6 +80,31 @@ struct KeyEventMonitor: NSViewRepresentable {
                 coordinator.cmdPressedClean = false
             }
 
+            // Detect clean double-tap on Option.
+            if mods == [.option] {
+                if !coordinator.optionIsDown {
+                    coordinator.optionIsDown = true
+                    coordinator.optionPressedClean = true
+                }
+            } else {
+                if coordinator.optionIsDown {
+                    if coordinator.optionPressedClean && mods.isEmpty {
+                        let now = Date()
+                        if let last = coordinator.lastOptionTapAt,
+                           now.timeIntervalSince(last) <= optionDoubleTapInterval {
+                            coordinator.lastOptionTapAt = nil
+                            coordinator.onOptionDoubleTap?()
+                        } else {
+                            coordinator.lastOptionTapAt = now
+                        }
+                    } else {
+                        coordinator.lastOptionTapAt = nil
+                    }
+                }
+                coordinator.optionIsDown = false
+                coordinator.optionPressedClean = false
+            }
+
             return event
         }
 
@@ -80,6 +115,7 @@ struct KeyEventMonitor: NSViewRepresentable {
         context.coordinator.window = nsView.window
         context.coordinator.onKeyDown = onKeyDown
         context.coordinator.onCmdTap = onCmdTap
+        context.coordinator.onOptionDoubleTap = onOptionDoubleTap
         if context.coordinator.window == nil {
             DispatchQueue.main.async {
                 context.coordinator.window = nsView.window

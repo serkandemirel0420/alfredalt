@@ -35,13 +35,20 @@ enum HotKeyType: String, CaseIterable, Identifiable {
 @MainActor
 final class HotKeyManager: ObservableObject {
     static let shared = HotKeyManager()
-    static let hotKeyTypeKey = "hotKeyType"
+    private static let settingsFileName = "hotkey-settings.json"
+    private static let legacyHotKeyTypeKey = "hotKeyType"
     static let doubleTapInterval: TimeInterval = 0.3
+
+    private struct PersistedHotKeySettings: Codable {
+        let hotKeyType: String
+    }
     
     @Published var currentHotKey: HotKeyType {
         didSet {
             if currentHotKey != oldValue {
-                saveHotKeyPreference()
+                if !isApplyingPersistedState {
+                    saveHotKeyPreference()
+                }
                 _ = register()
             }
         }
@@ -56,15 +63,10 @@ final class HotKeyManager: ObservableObject {
     private var wasOptionPressed = false
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var isApplyingPersistedState = false
     
     private init() {
-        // Load saved hotkey preference
-        if let savedType = UserDefaults.standard.string(forKey: HotKeyManager.hotKeyTypeKey),
-           let type = HotKeyType(rawValue: savedType) {
-            currentHotKey = type
-        } else {
-            currentHotKey = .doubleOption
-        }
+        currentHotKey = Self.loadPersistedHotKeyType() ?? .doubleOption
     }
     
     func setHandler(_ handler: @escaping () -> Void) {
@@ -271,11 +273,40 @@ final class HotKeyManager: ObservableObject {
     }
     
     func saveHotKeyPreference() {
-        UserDefaults.standard.set(currentHotKey.rawValue, forKey: HotKeyManager.hotKeyTypeKey)
-        NSLog("HotKeyManager: Saved preference: \(currentHotKey.rawValue)")
+        let payload = PersistedHotKeySettings(hotKeyType: currentHotKey.rawValue)
+        _ = SettingsStore.shared.saveJSON(payload, fileName: Self.settingsFileName)
     }
     
     func setHotKey(_ type: HotKeyType) {
         currentHotKey = type
+    }
+
+    func reloadFromDisk() {
+        guard let loaded = Self.loadPersistedHotKeyType(), loaded != currentHotKey else {
+            return
+        }
+        isApplyingPersistedState = true
+        currentHotKey = loaded
+        isApplyingPersistedState = false
+    }
+
+    private static func loadPersistedHotKeyType() -> HotKeyType? {
+        if let payload: PersistedHotKeySettings = SettingsStore.shared.loadJSON(
+            PersistedHotKeySettings.self,
+            fileName: settingsFileName
+        ), let type = HotKeyType(rawValue: payload.hotKeyType) {
+            return type
+        }
+        return migrateLegacyUserDefaultsIfNeeded()
+    }
+
+    private static func migrateLegacyUserDefaultsIfNeeded() -> HotKeyType? {
+        guard let savedType = UserDefaults.standard.string(forKey: legacyHotKeyTypeKey),
+              let type = HotKeyType(rawValue: savedType) else {
+            return nil
+        }
+        let payload = PersistedHotKeySettings(hotKeyType: type.rawValue)
+        _ = SettingsStore.shared.saveJSON(payload, fileName: settingsFileName)
+        return type
     }
 }

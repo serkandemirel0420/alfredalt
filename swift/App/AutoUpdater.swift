@@ -225,7 +225,7 @@ final class AutoUpdater: ObservableObject {
         try scriptContent.write(to: scriptURL, atomically: true, encoding: .utf8)
         
         // Make script executable
-        try await runScript("chmod +x \"\(scriptURL.path)\"")
+        _ = try await runScript("chmod +x \"\(scriptURL.path)\"")
         
         // Run the update script - it will run synchronously until it backgrounds itself
         // We use a different approach: run it in a way that allows it to continue after we exit

@@ -1109,6 +1109,13 @@ public func loadJsonStoragePath()throws  -> String  {
     )
 })
 }
+public func renameItem(itemId: Int64, title: String)throws   {try rustCallWithError(FfiConverterTypeBackendError_lift) {
+    uniffi_alfred_alt_fn_func_rename_item(
+        FfiConverterInt64.lower(itemId),
+        FfiConverterString.lower(title),$0
+    )
+}
+}
 public func saveHotkey(hotkey: String)throws   {try rustCallWithError(FfiConverterTypeBackendError_lift) {
     uniffi_alfred_alt_fn_func_save_hotkey(
         FfiConverterString.lower(hotkey),$0
@@ -1175,6 +1182,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_alfred_alt_checksum_func_load_json_storage_path() != 17743) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_alfred_alt_checksum_func_rename_item() != 28376) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_alfred_alt_checksum_func_save_hotkey() != 49443) {

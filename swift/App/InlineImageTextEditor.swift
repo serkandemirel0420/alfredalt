@@ -40,6 +40,7 @@ private protocol EditorCommandDelegate: AnyObject {
     func increaseDocumentFontSize()
     func decreaseDocumentFontSize()
     func currentSearchQuery() -> String
+    func areSearchHighlightsEnabled() -> Bool
 }
 
 private func editorFont(for fontSize: CGFloat) -> NSFont {
@@ -978,8 +979,10 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
         textView.setSelectedRange(targetMatch)
         textView.scrollRangeToVisible(targetMatch)
         
-        // Provide visual feedback by briefly highlighting
-        highlightMatchTemporarily(range: targetMatch, in: textView)
+        // Provide visual feedback by briefly highlighting when enabled.
+        if commandDelegate?.areSearchHighlightsEnabled() ?? true {
+            highlightMatchTemporarily(range: targetMatch, in: textView)
+        }
         
         return true
     }
@@ -1016,11 +1019,13 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
 fileprivate final class EditorMinimapView: NSView {
     weak var textView: NSTextView?
     var searchQuery: String = ""
+    var highlightSearchMatches: Bool = true
     
     // Cached line data for efficient rendering
     private var lineData: [(y: CGFloat, height: CGFloat, hasSearchMatch: Bool)] = []
     private var lastTextHash: Int = 0
     private var lastQuery: String = ""
+    private var lastHighlightSearchMatches = true
     private var lastContainerWidth: CGFloat = 0
     
     // Visual constants
@@ -1058,6 +1063,7 @@ fileprivate final class EditorMinimapView: NSView {
     func invalidateCache() {
         lastTextHash = 0
         lastQuery = ""
+        lastHighlightSearchMatches = true
         lastContainerWidth = 0
         needsDisplay = true
     }
@@ -1073,18 +1079,23 @@ fileprivate final class EditorMinimapView: NSView {
         let text = textView.string
         let currentHash = text.hash
         let queryChanged = searchQuery != lastQuery
+        let highlightStateChanged = highlightSearchMatches != lastHighlightSearchMatches
         let containerWidth = textContainer.containerSize.width
         let widthChanged = abs(containerWidth - lastContainerWidth) > 0.5
         
         // Only rebuild if necessary
-        guard currentHash != lastTextHash || queryChanged || widthChanged else { return }
+        guard currentHash != lastTextHash || queryChanged || highlightStateChanged || widthChanged else { return }
         
         lastTextHash = currentHash
         lastQuery = searchQuery
+        lastHighlightSearchMatches = highlightSearchMatches
         lastContainerWidth = containerWidth
         
         let fullText = text as NSString
-        let searchLower = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let searchTerms = highlightSearchMatches ? searchQuery
+            .split(separator: " ")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { !$0.isEmpty } : []
         let glyphRange = layoutManager.glyphRange(for: textContainer)
         
         var generated: [(y: CGFloat, height: CGFloat, hasSearchMatch: Bool)] = []
@@ -1094,11 +1105,11 @@ fileprivate final class EditorMinimapView: NSView {
             let lineCharRange = layoutManager.characterRange(forGlyphRange: lineGlyphRange, actualGlyphRange: nil)
             var hasMatch = false
             
-            if !searchLower.isEmpty,
+            if !searchTerms.isEmpty,
                lineCharRange.length > 0,
                NSMaxRange(lineCharRange) <= fullText.length {
                 let lineText = fullText.substring(with: lineCharRange).lowercased()
-                hasMatch = lineText.contains(searchLower)
+                hasMatch = searchTerms.contains { lineText.contains($0) }
             }
             
             generated.append((
@@ -1265,6 +1276,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
     @Binding var text: String
     var imagesByKey: [String: Data]
     var searchQuery: String = ""
+    var highlightSearchMatches: Bool = true
     var defaultImageWidth: CGFloat = 360
     var fontSize: CGFloat = editorDefaultFontSize
     var onIncreaseDocumentFontSize: (() -> Void)?
@@ -1325,6 +1337,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
         let minimap = EditorMinimapView(frame: NSRect(x: 0, y: 0, width: minimapWidth, height: 0))
         minimap.textView = textView
         minimap.searchQuery = searchQuery
+        minimap.highlightSearchMatches = highlightSearchMatches
         minimap.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(minimap)
         
@@ -1362,6 +1375,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
         
         // Update minimap search query
         context.coordinator.minimapView?.searchQuery = searchQuery
+        context.coordinator.minimapView?.highlightSearchMatches = highlightSearchMatches
         context.coordinator.minimapView?.invalidateCache()
     }
 
@@ -1388,6 +1402,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
         private var lastRenderedQuery: String = ""
         private var lastImageSignature: Int = 0
         private var lastRenderedFontSize: CGFloat = editorDefaultFontSize
+        private var lastRenderedHighlightState = true
 
         init(parent: InlineImageTextEditor) {
             self.parent = parent
@@ -1417,12 +1432,21 @@ struct InlineImageTextEditor: NSViewRepresentable {
             return parent.searchQuery
         }
 
+        func areSearchHighlightsEnabled() -> Bool {
+            parent.highlightSearchMatches
+        }
+
         func imageDidResize() {
             guard let textView else { return }
 
             isApplyingProgrammaticUpdate = true
             normalizeVisibleTextAttributes(in: textView, fontSize: parent.fontSize)
             applyEditorTypingAppearance(to: textView, fontSize: parent.fontSize)
+            applySearchHighlightsTemporarily(
+                in: textView,
+                query: parent.searchQuery,
+                enabled: parent.highlightSearchMatches
+            )
             isApplyingProgrammaticUpdate = false
 
             let plain = makePlainText(from: textView.attributedString(), baseFontSize: parent.fontSize, closeOpenStylesAtEnd: true)
@@ -1448,7 +1472,8 @@ struct InlineImageTextEditor: NSViewRepresentable {
             let signature = imageSignature(parent.imagesByKey)
             let fontSizeChanged = abs(parent.fontSize - lastRenderedFontSize) > 0.01
             let queryChanged = parent.searchQuery != lastRenderedQuery
-            guard force || parent.text != lastRenderedText || signature != lastImageSignature || fontSizeChanged || queryChanged else {
+            let highlightStateChanged = parent.highlightSearchMatches != lastRenderedHighlightState
+            guard force || parent.text != lastRenderedText || signature != lastImageSignature || fontSizeChanged || queryChanged || highlightStateChanged else {
                 return
             }
 
@@ -1466,6 +1491,11 @@ struct InlineImageTextEditor: NSViewRepresentable {
             textView.textStorage?.setAttributedString(attributed)
             normalizeVisibleTextAttributes(in: textView, fontSize: parent.fontSize)
             applyEditorTypingAppearance(to: textView, fontSize: parent.fontSize)
+            applySearchHighlightsTemporarily(
+                in: textView,
+                query: parent.searchQuery,
+                enabled: parent.highlightSearchMatches
+            )
 
             let newCursorAttributedLocation = attributedLocation(fromPlainOffset: oldPlainCursor, in: textView)
             let safeLocation = max(0, min(newCursorAttributedLocation, textView.string.utf16.count))
@@ -1476,6 +1506,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
             lastImageSignature = signature
             lastRenderedFontSize = parent.fontSize
             lastRenderedQuery = parent.searchQuery
+            lastRenderedHighlightState = parent.highlightSearchMatches
             publishSelectionIfNeeded()
             minimapView?.invalidateCache()
         }
@@ -1493,6 +1524,11 @@ struct InlineImageTextEditor: NSViewRepresentable {
             isApplyingProgrammaticUpdate = true
             normalizeVisibleTextAttributes(in: textView, fontSize: parent.fontSize)
             applyEditorTypingAppearance(to: textView, fontSize: parent.fontSize)
+            applySearchHighlightsTemporarily(
+                in: textView,
+                query: parent.searchQuery,
+                enabled: parent.highlightSearchMatches
+            )
             isApplyingProgrammaticUpdate = false
 
             // Safely extract plain text
@@ -1654,19 +1690,25 @@ private func makeAttributedText(
         output.append(NSAttributedString(string: String(plainText[cursor...]), attributes: activeAttributes()))
     }
 
-    if !searchQuery.isEmpty {
-        highlightSearchTerms(in: output, query: searchQuery)
-    }
+    _ = searchQuery
 
     return output
 }
 
-private func highlightSearchTerms(in attributedString: NSMutableAttributedString, query: String) {
+private func applySearchHighlightsTemporarily(in textView: NSTextView, query: String, enabled: Bool) {
+    guard let layoutManager = textView.layoutManager else {
+        return
+    }
+
+    let fullLength = textView.string.utf16.count
+    let fullRange = NSRange(location: 0, length: fullLength)
+    layoutManager.removeTemporaryAttribute(.backgroundColor, forCharacterRange: fullRange)
+    guard enabled else { return }
+
     let terms = query.split(separator: " ").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
     guard !terms.isEmpty else { return }
 
-    let string = attributedString.string as NSString
-    let fullRange = NSRange(location: 0, length: string.length)
+    let string = textView.string as NSString
 
     for term in terms {
         var searchRange = fullRange
@@ -1676,9 +1718,12 @@ private func highlightSearchTerms(in attributedString: NSMutableAttributedString
             if foundRange.location != NSNotFound {
                 // Defensive: ensure range is within bounds
                 guard NSMaxRange(foundRange) <= string.length else { break }
-                
-                attributedString.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.4), range: foundRange)
-                attributedString.addAttribute(.foregroundColor, value: NSColor.black, range: foundRange)
+
+                layoutManager.addTemporaryAttribute(
+                    .backgroundColor,
+                    value: NSColor.systemYellow.withAlphaComponent(0.4),
+                    forCharacterRange: foundRange
+                )
 
                 let newLocation = foundRange.upperBound
                 searchRange = NSRange(location: newLocation, length: fullRange.length - newLocation)
@@ -1694,6 +1739,7 @@ private func applyEditorTypingAppearance(to textView: NSTextView, fontSize: CGFl
     var attributes = textView.typingAttributes
     attributes[.font] = editorFont(for: fontSize)
     attributes[.foregroundColor] = editorTextColor
+    attributes.removeValue(forKey: .backgroundColor)
     textView.typingAttributes = attributes
 }
 
