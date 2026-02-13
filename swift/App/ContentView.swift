@@ -949,16 +949,6 @@ struct SettingsWindowView: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Title bar area for dragging and focus
-            HStack {
-                Spacer()
-            }
-            .frame(height: 28)
-            .background(Color(nsColor: .windowBackgroundColor))
-            .overlay(
-                WindowDragHandle(inset: 0)
-            )
-            
             // Tab picker
             HStack(spacing: 0) {
                 ForEach(SettingsTab.allCases) { tab in
@@ -1010,6 +1000,11 @@ struct SettingsWindowView: View {
             Button("Later", role: .cancel) {}
         } message: {
             Text("The update has been installed. Restart the app to apply the changes.")
+        }
+        .alert("Update Failed", isPresented: $autoUpdater.showErrorAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(autoUpdater.errorMessage)
         }
     }
     
@@ -1068,7 +1063,29 @@ struct SettingsWindowView: View {
                         .foregroundStyle(.secondary)
                 }
                 
-                if autoUpdater.isUpdating {
+                if !autoUpdater.errorMessage.isEmpty && !autoUpdater.isUpdating {
+                    // Show error state
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(themeManager.colors.errorColor)
+                        Text(autoUpdater.errorMessage)
+                            .font(.system(size: 12))
+                            .foregroundStyle(themeManager.colors.errorColor)
+                            .lineLimit(2)
+                        Spacer()
+                        Button("Retry") {
+                            autoUpdater.errorMessage = ""
+                            if let url = updateChecker.downloadURL,
+                               let version = updateChecker.latestVersion {
+                                autoUpdater.startAutoUpdate(downloadURL: url, version: version)
+                            }
+                        }
+                        .font(.system(size: 12))
+                    }
+                    .padding(10)
+                    .background(themeManager.colors.errorColor.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                } else if autoUpdater.isUpdating {
                     HStack(spacing: 8) {
                         ProgressView()
                             .controlSize(.small)
