@@ -9,6 +9,7 @@ final class UpdateChecker: ObservableObject {
 
     private static let releasesURL = URL(string: "https://api.github.com/repos/serkandemirel0420/alfredalt/releases/latest")!
     private var hasCheckedThisSession = false
+    var autoUpdateEnabled = true  // Enable automatic updates by default
 
     var currentVersion: String {
         RustBridgeClient.version()
@@ -19,10 +20,24 @@ final class UpdateChecker: ObservableObject {
         hasCheckedThisSession = true
         checkForUpdate()
     }
+    
+    func performAutoUpdate() {
+        guard autoUpdateEnabled,
+              updateAvailable,
+              let version = latestVersion,
+              let url = downloadURL else {
+            return
+        }
+        
+        // Start automatic update in background
+        AutoUpdater.shared.startAutoUpdate(downloadURL: url, version: version)
+    }
 
     func checkForUpdate() {
         guard !isChecking else { return }
         isChecking = true
+        print("[UpdateChecker] Checking for updates...")
+        print("[UpdateChecker] Current version: \(currentVersion)")
 
         Task { [weak self] in
             defer { Task { @MainActor in self?.isChecking = false } }
@@ -35,15 +50,18 @@ final class UpdateChecker: ObservableObject {
                 let (data, response) = try await URLSession.shared.data(for: request)
                 guard let httpResponse = response as? HTTPURLResponse,
                       httpResponse.statusCode == 200 else {
+                    print("[UpdateChecker] HTTP error: \((response as? HTTPURLResponse)?.statusCode ?? -1)")
                     return
                 }
 
                 guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let tagName = json["tag_name"] as? String else {
+                    print("[UpdateChecker] Failed to parse tag_name from JSON")
                     return
                 }
 
                 let remoteVersion = tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
+                print("[UpdateChecker] Remote version: \(remoteVersion)")
 
                 let browserURL: URL? = {
                     if let htmlURL = json["html_url"] as? String {
@@ -67,12 +85,14 @@ final class UpdateChecker: ObservableObject {
 
                 await MainActor.run { [weak self] in
                     guard let self else { return }
+                    let isNewer = self.isNewer(remote: remoteVersion, local: self.currentVersion)
+                    print("[UpdateChecker] Is newer: \(isNewer)")
                     self.latestVersion = remoteVersion
                     self.downloadURL = dmgURL ?? browserURL
-                    self.updateAvailable = self.isNewer(remote: remoteVersion, local: self.currentVersion)
+                    self.updateAvailable = isNewer
                 }
             } catch {
-                // Silently fail – update checking is best-effort
+                print("[UpdateChecker] Error checking for update: \(error)")
             }
         }
     }

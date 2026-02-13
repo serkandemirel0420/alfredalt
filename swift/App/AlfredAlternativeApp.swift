@@ -3,18 +3,16 @@ import SwiftUI
 
 final class AlfredAlternativeAppDelegate: NSObject, NSApplicationDelegate {
     weak var viewModel: LauncherViewModel?
-    private var hotKeyMonitor: GlobalHotKeyMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let monitor = GlobalHotKeyMonitor { [weak self] in
+        HotKeyManager.shared.setHandler { [weak self] in
             DispatchQueue.main.async {
                 self?.viewModel?.toggleLauncherVisibilityFromHotKey()
             }
         }
-        if !monitor.registerCommandSpace() {
-            NSLog("Failed to register global hotkey Command+Space.")
+        if !HotKeyManager.shared.register() {
+            NSLog("Failed to register global hotkey.")
         }
-        hotKeyMonitor = monitor
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -31,8 +29,7 @@ final class AlfredAlternativeAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        hotKeyMonitor?.unregister()
-        hotKeyMonitor = nil
+        HotKeyManager.shared.unregister()
     }
 }
 
@@ -41,12 +38,17 @@ struct AlfredAlternativeApp: App {
     @NSApplicationDelegateAdaptor(AlfredAlternativeAppDelegate.self) private var appDelegate
     @StateObject private var viewModel = LauncherViewModel()
     @StateObject private var updateChecker = UpdateChecker()
+    @StateObject private var autoUpdater = AutoUpdater.shared
+    @StateObject private var themeManager = ThemeManager.shared
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Scene {
         Window("Launcher", id: "launcher") {
             ContentView()
                 .environmentObject(viewModel)
                 .environmentObject(updateChecker)
+                .environmentObject(autoUpdater)
+                .environmentObject(themeManager)
                 .onAppear {
                     appDelegate.viewModel = viewModel
                     updateChecker.checkOncePerSession()
@@ -55,7 +57,8 @@ struct AlfredAlternativeApp: App {
         .commands {
             CommandGroup(replacing: .appSettings) {
                 Button("Settings...") {
-                    viewModel.presentSettings()
+                    viewModel.prepareSettings()
+                    openWindow(id: "settings")
                 }
                 .keyboardShortcut(",", modifiers: .command)
             }
@@ -67,8 +70,27 @@ struct AlfredAlternativeApp: App {
             EditorWindowView()
                 .environmentObject(viewModel)
                 .environmentObject(updateChecker)
+                .environmentObject(autoUpdater)
+                .environmentObject(themeManager)
         }
         .windowStyle(.automatic)
         .defaultSize(width: 980, height: 720)
+        
+        Window("Settings", id: "settings") {
+            SettingsWindowView()
+                .environmentObject(viewModel)
+                .environmentObject(updateChecker)
+                .environmentObject(autoUpdater)
+                .environmentObject(themeManager)
+                .onAppear {
+                    // Bring settings window to front when opened
+                    DispatchQueue.main.async {
+                        NSApp.windows.first { $0.title == "Settings" }?.makeKeyAndOrderFront(nil)
+                    }
+                }
+        }
+        .defaultSize(width: 800, height: 550)
+        .defaultPosition(.center)
+        .commandsRemoved()
     }
 }
