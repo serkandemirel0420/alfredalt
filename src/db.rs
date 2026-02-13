@@ -40,6 +40,7 @@ const INDEX_WRITER_HEAP_BYTES: usize = 50_000_000;
 const DOC_TYPE_ITEM: &str = "item";
 const DOC_TYPE_SETTING: &str = "setting";
 const LUCENE_SNIPPET_MAX_CHARS: usize = 120;
+const BLOCK_NOTE_PAYLOAD_PREFIX: &str = "__AABLK1__";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ExportItem {
@@ -942,12 +943,14 @@ fn substring_search_rows(
             continue;
         }
 
+        let sanitized_note = sanitize_note_for_preview(&item.note);
+
         let matches = if tokens.len() <= 1 {
             contains_case_insensitive(&item.title, query)
-                || contains_case_insensitive(&item.note, query)
+                || contains_case_insensitive(&sanitized_note, query)
         } else {
             let title_lower = item.title.to_lowercase();
-            let note_lower = item.note.to_lowercase();
+            let note_lower = sanitized_note.to_lowercase();
             tokens.iter().all(|token| {
                 let t = token.to_lowercase();
                 title_lower.contains(&t) || note_lower.contains(&t)
@@ -1025,7 +1028,8 @@ fn fuzzy_search_rows(
             continue;
         }
 
-        let score = fuzzy_row_score(&item.title, &item.note, query_terms);
+        let sanitized_note = sanitize_note_for_preview(&item.note);
+        let score = fuzzy_row_score(&item.title, &sanitized_note, query_terms);
         if score < FUZZY_SIMILARITY_THRESHOLD {
             continue;
         }
@@ -1297,9 +1301,17 @@ fn build_field_snippet(
 }
 
 fn sanitize_note_for_preview(note: &str) -> String {
-    let without_images = strip_inline_image_refs(note);
+    let without_payload = strip_block_payload_lines(note);
+    let without_images = strip_inline_image_refs(&without_payload);
     let collapsed = collapse_whitespace(&without_images);
     strip_image_residue_tokens(&collapsed)
+}
+
+fn strip_block_payload_lines(note: &str) -> String {
+    note.lines()
+        .filter(|line| !line.trim_start().starts_with(BLOCK_NOTE_PAYLOAD_PREFIX))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn strip_inline_image_refs(text: &str) -> String {
@@ -1891,6 +1903,13 @@ mod tests {
     #[test]
     fn sanitize_note_for_preview_removes_inline_image_refs_and_flattens_newlines() {
         let note = "line 1\n![image](alfred://image/img-1-aaaa?w=360)\nline 2";
+        let sanitized = sanitize_note_for_preview(note);
+        assert_eq!(sanitized, "line 1 line 2");
+    }
+
+    #[test]
+    fn sanitize_note_for_preview_removes_block_payload_line() {
+        let note = "line 1\n__AABLK1__eyJ2ZXJzaW9uIjoxfQ==\nline 2";
         let sanitized = sanitize_note_for_preview(note);
         assert_eq!(sanitized, "line 1 line 2");
     }

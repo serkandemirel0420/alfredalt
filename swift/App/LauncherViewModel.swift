@@ -272,25 +272,41 @@ final class LauncherViewModel: ObservableObject {
         return !(pasteboard.readObjects(forClasses: [NSImage.self], options: nil) ?? []).isEmpty
     }
 
-    func pasteImageFromClipboard(at cursorCharIndex: Int?) async {
+    func captureImageMarkdownRefFromClipboard() -> String? {
         guard var item = selectedItem else {
-            return
+            return nil
         }
 
         if item.images.count >= maxNoteImageCount {
             errorMessage = "Too many note images (max \(maxNoteImageCount))"
-            return
+            return nil
         }
 
         guard let imageBytes = clipboardImageBytes() else {
             errorMessage = "Clipboard does not contain an image"
-            return
+            return nil
         }
 
         let key = nextImageKey(existing: Set(item.images.map(\.imageKey)))
         item.images.append(NoteImageRecord(imageKey: key, bytes: imageBytes))
+        selectedItem = item
+        errorMessage = nil
 
-        editorText = insertMarkdownImageRef(into: editorText, key: key, cursorCharIndex: cursorCharIndex)
+        return markdownImageRef(for: key, width: nil)
+    }
+
+    func pasteImageFromClipboard(at cursorCharIndex: Int?) async {
+        guard let markdownRef = captureImageMarkdownRefFromClipboard(),
+              var item = selectedItem
+        else {
+            return
+        }
+
+        editorText = insertMarkdownImageRef(
+            into: editorText,
+            markdownRef: markdownRef,
+            cursorCharIndex: cursorCharIndex
+        )
         item.note = editorText
         selectedItem = item
         errorMessage = nil
@@ -489,11 +505,18 @@ final class LauncherViewModel: ObservableObject {
     }
 
     private func appendMarkdownImageRef(to note: String, key: String) -> String {
-        insertMarkdownImageRef(into: note, key: key, cursorCharIndex: note.count)
+        insertMarkdownImageRef(
+            into: note,
+            markdownRef: markdownImageRef(for: key, width: nil),
+            cursorCharIndex: note.count
+        )
     }
 
-    private func insertMarkdownImageRef(into note: String, key: String, cursorCharIndex: Int?) -> String {
-        let ref = "![image](\(noteImageURLPrefix)\(key))"
+    private func insertMarkdownImageRef(
+        into note: String,
+        markdownRef: String,
+        cursorCharIndex: Int?
+    ) -> String {
         let bounded = max(0, min(cursorCharIndex ?? note.count, note.count))
         let insertionIndex = note.index(note.startIndex, offsetBy: bounded)
         var output = note
@@ -504,13 +527,20 @@ final class LauncherViewModel: ObservableObject {
         if needsLeadingNewline {
             insertion += "\n"
         }
-        insertion += ref
+        insertion += markdownRef
         if needsTrailingNewline {
             insertion += "\n"
         }
 
         output.insert(contentsOf: insertion, at: insertionIndex)
         return output
+    }
+
+    private func markdownImageRef(for key: String, width: Int?) -> String {
+        if let width {
+            return "![image](\(noteImageURLPrefix)\(key)?w=\(width))"
+        }
+        return "![image](\(noteImageURLPrefix)\(key))"
     }
 
     private func removeMarkdownImageRef(from note: String, key: String) -> String {
@@ -545,7 +575,7 @@ final class LauncherViewModel: ObservableObject {
         }
 
         let noteRange = NSRange(note.startIndex..<note.endIndex, in: note)
-        let replacement = "![image](\(noteImageURLPrefix)\(key)?w=\(width))"
+        let replacement = markdownImageRef(for: key, width: width)
         let updated = regex.stringByReplacingMatches(
             in: note,
             options: [],

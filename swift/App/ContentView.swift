@@ -1746,28 +1746,99 @@ private struct ThemeCard: View {
     }
 }
 
+private enum EditorInteractionMode {
+    case edit
+    case navigation
+}
+
 private struct EditorSheet: View {
     @ObservedObject var viewModel: LauncherViewModel
     @EnvironmentObject var themeManager: ThemeManager
     @Environment(\.dismiss) private var dismiss
-    @State private var editorCursorCharIndex: Int?
     @State private var isClosingEditor = false
+    @State private var rootBlocks: [EditorBlock] = []
+    @State private var blockPath: [String] = []
+    @State private var selectedBlockID: String?
+    @State private var trailingEmptySelectionDepth: Int = 0
+    @State private var interactionMode: EditorInteractionMode = .edit
+    @FocusState private var focusedBlockID: String?
+
+    private var currentBlocks: [EditorBlock] {
+        BlockTree.blocks(at: blockPath, in: rootBlocks)
+    }
+
+    private var breadcrumbTitles: [String] {
+        BlockTree.blockTitles(for: blockPath, in: rootBlocks)
+    }
+
+    private var currentPageTitle: String {
+        if let nestedTitle = breadcrumbTitles.last {
+            return nestedTitle
+        }
+        return viewModel.selectedItem?.title ?? "Editor"
+    }
+
+    private var interactionModeLabel: String {
+        interactionMode == .navigation ? "Navigation" : "Edit"
+    }
+
+    private var isTrailingEmptySelected: Bool {
+        trailingEmptySelectionDepth > 0
+    }
+
+    private var visibleEmptyRowCount: Int {
+        guard interactionMode == .navigation else {
+            return 0
+        }
+        return max(1, trailingEmptySelectionDepth + 1)
+    }
+
+    private var isInDeepDocument: Bool {
+        !blockPath.isEmpty
+    }
+
+    private var deepDocumentSummaryText: String {
+        let nestedCount = currentBlocks.filter { $0.isPage || !$0.children.isEmpty }.count
+        let preview = currentBlocks
+            .map(\.text)
+            .map { $0.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .prefix(2)
+            .joined(separator: " | ")
+
+        var summary = "\(currentBlocks.count) blocks, \(nestedCount) nested"
+        if !preview.isEmpty {
+            summary += " | \(preview)"
+        }
+        return summary
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(viewModel.selectedItem?.title ?? "Editor")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(themeManager.colors.itemTitleText)
-
-            InlineImageTextEditor(
-                text: $viewModel.editorText,
-                imagesByKey: Dictionary(uniqueKeysWithValues: (viewModel.selectedItem?.images ?? []).map { ($0.imageKey, $0.bytes) }),
-                searchQuery: viewModel.query,
-                defaultImageWidth: 360,
-                fontSize: themeManager.editorFontSize
-            ) { cursorIndex in
-                editorCursorCharIndex = cursorIndex
+            HStack(spacing: 10) {
+                Text(currentPageTitle)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(themeManager.colors.itemTitleText)
+                Spacer()
+                Text(interactionModeLabel)
+                    .font(.system(size: 12, weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(themeManager.colors.searchFieldBackground)
+                    .clipShape(Capsule())
+                    .foregroundStyle(themeManager.colors.itemSubtitleText)
+                Text("Cmd+Right dive  Cmd+Left back")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(themeManager.colors.itemSubtitleText)
             }
+
+            blockBreadcrumbs()
+            if isInDeepDocument {
+                deepDocumentSummaryView()
+            }
+            blockActionToolbar()
+
+            blockListView()
             .padding(10)
             .background(themeManager.colors.editorTextBackground)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -1776,15 +1847,21 @@ private struct EditorSheet: View {
         .frame(minWidth: 760, minHeight: 500)
         .background(themeManager.colors.editorBackground)
         .background(
-            KeyEventMonitor { event in
-                handleEditorKeyEvent(event)
-            }
+            KeyEventMonitor(
+                onKeyDown: { event in
+                    handleEditorKeyEvent(event)
+                },
+                onCmdTap: {
+                    handleEditorCmdTap()
+                }
+            )
         )
-        .onChange(of: viewModel.editorText) { _, _ in
-            viewModel.scheduleAutosave()
-        }
         .onAppear {
             isClosingEditor = false
+            loadBlocksFromEditorText()
+        }
+        .onChange(of: viewModel.selectedItem?.id) { _, _ in
+            loadBlocksFromEditorText()
         }
         .onDisappear {
             if isClosingEditor {
@@ -1801,27 +1878,53 @@ private struct EditorSheet: View {
             return true
         }
 
-        if modifiers == [.command],
-           event.charactersIgnoringModifiers?.lowercased() == "v",
-           viewModel.hasImageInClipboard() {
-            Task { await viewModel.pasteImageFromClipboard(at: editorCursorCharIndex) }
-            return true
+        if interactionMode == .navigation {
+            if modifiers == [.command], event.keyCode == 124 {
+                return diveIntoSelectedBlock()
+            }
+
+            if modifiers == [.command], event.keyCode == 123 {
+                return navigateBackToParentBlock()
+            }
+
+            if modifiers.isEmpty {
+                switch event.keyCode {
+                case 126: // up
+                    return moveSelectionBy(delta: -1)
+                case 125: // down
+                    return moveSelectionBy(delta: 1)
+                case 36, 76: // enter
+                    return enterEditModeForSelection()
+                case 53: // escape
+                    return closeEditorFromNavigationMode()
+                default:
+                    break
+                }
+            }
         }
 
-        if modifiers.isEmpty, event.keyCode == 53 {
-            guard !isClosingEditor else {
+        if interactionMode == .edit {
+            if modifiers == [.command],
+               event.charactersIgnoringModifiers?.lowercased() == "v",
+               viewModel.hasImageInClipboard(),
+               insertClipboardImageReferenceIntoSelectedBlock() {
                 return true
             }
 
-            isClosingEditor = true
-            Task { @MainActor in
-                _ = await viewModel.flushAutosave()
+            if modifiers.isEmpty, event.keyCode == 53 {
+                enterNavigationMode()
+                return true
             }
-            dismiss()
-            return true
         }
 
         return false
+    }
+
+    private func handleEditorCmdTap() {
+        guard interactionMode == .navigation else {
+            return
+        }
+        _ = navigateBackToParentBlock()
     }
 
     private func handleEditorFontSizeShortcut(_ event: NSEvent, modifiers: NSEvent.ModifierFlags) -> Bool {
@@ -1854,5 +1957,559 @@ private struct EditorSheet: View {
         default:
             return false
         }
+    }
+
+    @ViewBuilder
+    private func blockBreadcrumbs() -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                Text("Root")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(themeManager.colors.itemTitleText)
+
+                ForEach(Array(breadcrumbTitles.enumerated()), id: \.offset) { _, title in
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(themeManager.colors.itemSubtitleText)
+                    Text(title)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                        .foregroundStyle(themeManager.colors.itemSubtitleText)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func deepDocumentSummaryView() -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(themeManager.colors.itemSubtitleText)
+            Text(deepDocumentSummaryText)
+                .font(.system(size: 12))
+                .lineLimit(2)
+                .foregroundStyle(themeManager.colors.itemSubtitleText)
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(themeManager.colors.searchFieldBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func blockActionToolbar() -> some View {
+        HStack(spacing: 8) {
+            Button {
+                if interactionMode == .navigation {
+                    _ = enterEditModeForSelection()
+                } else {
+                    enterNavigationMode()
+                }
+            } label: {
+                Label(
+                    interactionMode == .navigation ? "Edit Block" : "Navigation",
+                    systemImage: interactionMode == .navigation ? "pencil" : "list.bullet"
+                )
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                addBlockAtCurrentLevel()
+            } label: {
+                Label("New Block", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+
+            Button {
+                _ = diveIntoSelectedBlock()
+            } label: {
+                Label("Dive", systemImage: "arrowshape.turn.up.right")
+            }
+            .buttonStyle(.bordered)
+            .disabled(selectedBlockID == nil || interactionMode != .navigation)
+
+            Button {
+                _ = navigateBackToParentBlock()
+            } label: {
+                Label("Back", systemImage: "arrowshape.turn.up.left")
+            }
+            .buttonStyle(.bordered)
+            .disabled(blockPath.isEmpty || interactionMode != .navigation)
+
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private func blockListView() -> some View {
+        if currentBlocks.isEmpty && interactionMode != .navigation {
+            VStack(spacing: 10) {
+                Text("This block is empty")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(themeManager.colors.itemSubtitleText)
+                Button("Add First Block") {
+                    addBlockAtCurrentLevel()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .frame(maxWidth: .infinity, minHeight: 360)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 8) {
+                    ForEach(currentBlocks) { block in
+                        blockRow(for: block)
+                    }
+
+                    if interactionMode == .navigation {
+                        ForEach(1...visibleEmptyRowCount, id: \.self) { depth in
+                            trailingEmptyBlockRow(depth: depth)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 360)
+        }
+    }
+
+    @ViewBuilder
+    private func trailingEmptyBlockRow(depth: Int) -> some View {
+        let isSelected = trailingEmptySelectionDepth == depth
+
+        HStack(alignment: .center, spacing: 8) {
+            Circle()
+                .fill(isSelected ? themeManager.colors.selectedItemBackground : themeManager.colors.itemSubtitleText.opacity(0.35))
+                .frame(width: 8, height: 8)
+
+            Text("Empty line")
+                .font(.system(size: themeManager.editorFontSize))
+                .foregroundStyle(themeManager.colors.itemSubtitleText)
+                .italic()
+
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .background(isSelected ? themeManager.colors.selectedItemBackground.opacity(0.95) : themeManager.colors.itemBackground.opacity(0.65))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onTapGesture {
+            selectedBlockID = nil
+            trailingEmptySelectionDepth = depth
+        }
+    }
+
+    @ViewBuilder
+    private func blockRow(for block: EditorBlock) -> some View {
+        let isSelected = selectedBlockID == block.id
+        let showsNestedLink = block.isPage || !block.children.isEmpty
+
+        HStack(alignment: .top, spacing: 8) {
+            Circle()
+                .fill(isSelected ? themeManager.colors.selectedItemBackground : themeManager.colors.itemSubtitleText.opacity(0.35))
+                .frame(width: 8, height: 8)
+                .padding(.top, 8)
+
+            TextField("Type block content...", text: blockTextBinding(for: block.id), axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: themeManager.editorFontSize))
+                .foregroundStyle(themeManager.colors.itemTitleText)
+                .lineLimit(1...6)
+                .focused($focusedBlockID, equals: block.id)
+                .disabled(interactionMode == .navigation)
+                .onTapGesture {
+                    selectBlock(block.id)
+                }
+
+            if showsNestedLink {
+                Image(systemName: "link")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(themeManager.colors.itemSubtitleText)
+                    .padding(.top, 6)
+            }
+
+            if !block.children.isEmpty {
+                Text("\(block.children.count)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(themeManager.colors.searchFieldBackground)
+                    .clipShape(Capsule())
+                    .foregroundStyle(themeManager.colors.itemSubtitleText)
+                    .padding(.top, 3)
+            }
+
+            Button {
+                addChildBlock(parentID: block.id)
+            } label: {
+                Image(systemName: "plus.square")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(themeManager.colors.itemSubtitleText)
+            .help("Add child block")
+
+            Button {
+                selectedBlockID = block.id
+                _ = diveIntoSelectedBlock()
+            } label: {
+                Image(systemName: "arrow.right.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(themeManager.colors.itemSubtitleText)
+            .help("Open nested document")
+            .disabled(interactionMode != .navigation)
+
+            Button {
+                deleteBlock(block.id)
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(themeManager.colors.destructiveAction)
+            .help("Delete block")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(rowBackgroundColor(isSelected: isSelected))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .onTapGesture {
+            selectBlock(block.id)
+        }
+    }
+
+    private func blockTextBinding(for blockID: String) -> Binding<String> {
+        Binding(
+            get: { currentBlocks.first(where: { $0.id == blockID })?.text ?? "" },
+            set: { newText in
+                updateBlockText(blockID: blockID, text: newText)
+            }
+        )
+    }
+
+    private func rowBackgroundColor(isSelected: Bool) -> Color {
+        guard isSelected else {
+            return themeManager.colors.itemBackground.opacity(0.85)
+        }
+        if interactionMode == .navigation {
+            return themeManager.colors.selectedItemBackground.opacity(0.95)
+        }
+        return themeManager.colors.selectedItemBackground.opacity(0.65)
+    }
+
+    private func selectBlock(_ blockID: String) {
+        selectedBlockID = blockID
+        trailingEmptySelectionDepth = 0
+        if interactionMode == .edit {
+            focusedBlockID = blockID
+        }
+    }
+
+    private func loadBlocksFromEditorText() {
+        rootBlocks = BlockNoteCodec.decodeBlocks(from: viewModel.editorText)
+        if rootBlocks.isEmpty {
+            rootBlocks = [EditorBlock()]
+        }
+        blockPath = []
+        selectedBlockID = rootBlocks.first?.id
+        trailingEmptySelectionDepth = 0
+        interactionMode = .edit
+        focusSelectedBlockForEditing(placeCursorAtEnd: false)
+    }
+
+    @discardableResult
+    private func moveSelectionBy(delta: Int) -> Bool {
+        guard delta != 0 else {
+            return true
+        }
+
+        if currentBlocks.isEmpty {
+            selectedBlockID = nil
+            if trailingEmptySelectionDepth == 0 {
+                trailingEmptySelectionDepth = 1
+            }
+            if delta > 0 {
+                trailingEmptySelectionDepth += 1
+            } else {
+                trailingEmptySelectionDepth = max(1, trailingEmptySelectionDepth - 1)
+            }
+            return true
+        }
+
+        if isTrailingEmptySelected {
+            if delta > 0 {
+                trailingEmptySelectionDepth += 1
+                return true
+            }
+
+            if trailingEmptySelectionDepth > 1 {
+                trailingEmptySelectionDepth -= 1
+                return true
+            }
+
+            selectedBlockID = currentBlocks.last?.id
+            trailingEmptySelectionDepth = 0
+            return true
+        }
+
+        guard let selectedBlockID,
+              let currentIndex = currentBlocks.firstIndex(where: { $0.id == selectedBlockID })
+        else {
+            self.selectedBlockID = currentBlocks.first?.id
+            trailingEmptySelectionDepth = 0
+            return true
+        }
+
+        let nextIndex = currentIndex + delta
+        if nextIndex < 0 {
+            self.selectedBlockID = currentBlocks.first?.id
+            trailingEmptySelectionDepth = 0
+            return true
+        }
+
+        if nextIndex >= currentBlocks.count {
+            self.selectedBlockID = nil
+            trailingEmptySelectionDepth = 1
+            return true
+        }
+
+        self.selectedBlockID = currentBlocks[nextIndex].id
+        trailingEmptySelectionDepth = 0
+        return true
+    }
+
+    @discardableResult
+    private func enterEditModeForSelection() -> Bool {
+        if isTrailingEmptySelected {
+            let newBlock = EditorBlock()
+            BlockTree.mutateBlocks(at: blockPath, in: &rootBlocks) { blocks in
+                blocks.append(newBlock)
+            }
+            selectedBlockID = newBlock.id
+            trailingEmptySelectionDepth = 0
+            persistBlockDocument()
+        }
+
+        if selectedBlockID == nil {
+            selectedBlockID = currentBlocks.first?.id
+        }
+        guard selectedBlockID != nil else {
+            return false
+        }
+        interactionMode = .edit
+        focusSelectedBlockForEditing(placeCursorAtEnd: true)
+        return true
+    }
+
+    private func enterNavigationMode() {
+        interactionMode = .navigation
+        focusedBlockID = nil
+        if !currentBlocks.contains(where: { $0.id == selectedBlockID }) {
+            if let first = currentBlocks.first?.id {
+                selectedBlockID = first
+                trailingEmptySelectionDepth = 0
+            } else {
+                selectedBlockID = nil
+                trailingEmptySelectionDepth = 1
+            }
+        } else {
+            trailingEmptySelectionDepth = 0
+        }
+    }
+
+    private func focusSelectedBlockForEditing(placeCursorAtEnd: Bool) {
+        guard let blockID = selectedBlockID else {
+            return
+        }
+
+        focusedBlockID = nil
+        DispatchQueue.main.async {
+            focusedBlockID = blockID
+            guard placeCursorAtEnd else {
+                return
+            }
+            DispatchQueue.main.async {
+                moveCursorToEndInFocusedTextField()
+            }
+        }
+    }
+
+    private func moveCursorToEndInFocusedTextField() {
+        guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else {
+            return
+        }
+        let length = editor.string.utf16.count
+        editor.setSelectedRange(NSRange(location: length, length: 0))
+    }
+
+    @discardableResult
+    private func closeEditorFromNavigationMode() -> Bool {
+        guard !isClosingEditor else {
+            return true
+        }
+        isClosingEditor = true
+        Task { @MainActor in
+            _ = await viewModel.flushAutosave()
+        }
+        dismiss()
+        return true
+    }
+
+    private func updateBlockText(blockID: String, text: String) {
+        BlockTree.mutateBlocks(at: blockPath, in: &rootBlocks) { blocks in
+            guard let idx = blocks.firstIndex(where: { $0.id == blockID }) else {
+                return
+            }
+            blocks[idx].text = text
+        }
+        persistBlockDocument()
+    }
+
+    private func addBlockAtCurrentLevel() {
+        let newBlock = EditorBlock()
+        BlockTree.mutateBlocks(at: blockPath, in: &rootBlocks) { blocks in
+            blocks.append(newBlock)
+        }
+        selectedBlockID = newBlock.id
+        trailingEmptySelectionDepth = 0
+        persistBlockDocument()
+        if interactionMode == .edit {
+            focusSelectedBlockForEditing(placeCursorAtEnd: false)
+        }
+    }
+
+    private func deleteBlock(_ blockID: String) {
+        BlockTree.mutateBlocks(at: blockPath, in: &rootBlocks) { blocks in
+            blocks.removeAll { $0.id == blockID }
+        }
+
+        if rootBlocks.isEmpty {
+            rootBlocks = [EditorBlock()]
+            blockPath = []
+        } else {
+            blockPath = BlockTree.sanitizedPath(blockPath, in: rootBlocks)
+        }
+
+        let visible = BlockTree.blocks(at: blockPath, in: rootBlocks)
+        if selectedBlockID == blockID || !visible.contains(where: { $0.id == selectedBlockID }) {
+            if let first = visible.first?.id {
+                selectedBlockID = first
+                trailingEmptySelectionDepth = 0
+            } else {
+                selectedBlockID = nil
+                trailingEmptySelectionDepth = interactionMode == .navigation ? 1 : 0
+            }
+        }
+
+        persistBlockDocument()
+    }
+
+    private func addChildBlock(parentID: String) {
+        let newChild = EditorBlock()
+        BlockTree.mutateBlocks(at: blockPath, in: &rootBlocks) { blocks in
+            guard let idx = blocks.firstIndex(where: { $0.id == parentID }) else {
+                return
+            }
+            blocks[idx].isPage = true
+            blocks[idx].children.append(newChild)
+        }
+
+        selectedBlockID = parentID
+        trailingEmptySelectionDepth = 0
+        persistBlockDocument()
+    }
+
+    @discardableResult
+    private func diveIntoSelectedBlock() -> Bool {
+        guard let selectedID = selectedBlockID,
+              currentBlocks.contains(where: { $0.id == selectedID })
+        else {
+            return false
+        }
+
+        BlockTree.mutateBlocks(at: blockPath, in: &rootBlocks) { blocks in
+            guard let idx = blocks.firstIndex(where: { $0.id == selectedID }) else {
+                return
+            }
+            blocks[idx].isPage = true
+        }
+
+        blockPath.append(selectedID)
+        selectedBlockID = BlockTree.blocks(at: blockPath, in: rootBlocks).first?.id
+        trailingEmptySelectionDepth = selectedBlockID == nil ? 1 : 0
+        interactionMode = .navigation
+        focusedBlockID = nil
+        persistBlockDocument()
+        return true
+    }
+
+    @discardableResult
+    private func navigateBackToParentBlock() -> Bool {
+        guard let parentID = blockPath.popLast() else {
+            return false
+        }
+        selectedBlockID = parentID
+        trailingEmptySelectionDepth = 0
+        interactionMode = .navigation
+        focusedBlockID = nil
+        return true
+    }
+
+    private func insertClipboardImageReferenceIntoSelectedBlock() -> Bool {
+        guard let markdownRef = viewModel.captureImageMarkdownRefFromClipboard() else {
+            return false
+        }
+
+        if let selectedBlockID {
+            BlockTree.mutateBlocks(at: blockPath, in: &rootBlocks) { blocks in
+                guard let idx = blocks.firstIndex(where: { $0.id == selectedBlockID }) else {
+                    return
+                }
+                if blocks[idx].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    blocks[idx].text = markdownRef
+                } else {
+                    blocks[idx].text += "\n" + markdownRef
+                }
+            }
+        } else {
+            let block = EditorBlock(text: markdownRef)
+            BlockTree.mutateBlocks(at: blockPath, in: &rootBlocks) { blocks in
+                blocks.append(block)
+            }
+            selectedBlockID = block.id
+            trailingEmptySelectionDepth = 0
+        }
+
+        persistBlockDocument()
+        return true
+    }
+
+    private func persistBlockDocument() {
+        if rootBlocks.isEmpty {
+            rootBlocks = [EditorBlock()]
+            blockPath = []
+            selectedBlockID = rootBlocks.first?.id
+            trailingEmptySelectionDepth = 0
+        }
+
+        blockPath = BlockTree.sanitizedPath(blockPath, in: rootBlocks)
+        let visible = BlockTree.blocks(at: blockPath, in: rootBlocks)
+        if let selectedID = selectedBlockID,
+           !visible.contains(where: { $0.id == selectedID }) {
+            selectedBlockID = visible.first?.id
+        }
+
+        if selectedBlockID == nil && interactionMode == .navigation {
+            if trailingEmptySelectionDepth == 0 {
+                trailingEmptySelectionDepth = 1
+            }
+        } else {
+            trailingEmptySelectionDepth = 0
+        }
+
+        let encodedNote = BlockNoteCodec.encodeNote(from: rootBlocks)
+        if viewModel.editorText != encodedNote {
+            viewModel.editorText = encodedNote
+        }
+        viewModel.scheduleAutosave()
     }
 }
