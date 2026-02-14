@@ -203,6 +203,11 @@ final class AutoUpdater: ObservableObject {
             echo "ERROR: Copy failed"
             exit 1
         fi
+
+        # Defensive fallback: clear quarantine if present.
+        # Not needed for properly notarized builds, but prevents manual xattr steps
+        # when users update from non-notarized artifacts.
+        xattr -dr com.apple.quarantine "\(currentAppPath)" 2>/dev/null || true
         
         echo "Copy successful"
         
