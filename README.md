@@ -121,4 +121,4 @@ resources/                   Application assets
 
 ## License
 
-GNU GPLv3. See `LICENSE`.
+FUCK LICENCE
