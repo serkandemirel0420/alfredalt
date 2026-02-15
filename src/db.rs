@@ -472,14 +472,7 @@ impl Store {
     }
 
     fn ordered_items_for_listing(&self) -> Vec<&PersistedItem> {
-        let mut items: Vec<&PersistedItem> = self.data.items.values().collect();
-        items.sort_by(|left, right| {
-            left.title
-                .to_lowercase()
-                .cmp(&right.title.to_lowercase())
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        items
+        self.data.items.values().rev().collect()
     }
 
     fn ordered_items_by_id_asc(&self) -> Vec<&PersistedItem> {

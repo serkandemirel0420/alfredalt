@@ -245,8 +245,7 @@ struct ContentView: View {
 
     private func launcherShell(width: CGFloat) -> some View {
         let colors = themeManager.colors
-        let trimmedQuery = viewModel.query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let showResults = !trimmedQuery.isEmpty
+        let showResults = viewModel.shouldShowResultsForCurrentQuery
         let hasContent = showResults || isActionMenuVisible
         
         return VStack(alignment: .leading, spacing: 0) {

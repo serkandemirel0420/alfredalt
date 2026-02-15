@@ -12,13 +12,14 @@ private let editorDefaultFontSize: CGFloat = 15
 private let editorMinFontSize: CGFloat = 11
 private let editorMaxFontSize: CGFloat = 40
 private let editorFontSizeStep: CGFloat = 1
+private let defaultSearchLimit: UInt32 = 8
+private let listAllSearchLimit: UInt32 = 50
 
 @MainActor
 final class LauncherViewModel: ObservableObject {
     @Published var query: String = "" {
         didSet {
-            let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedQuery.isEmpty {
+            guard let searchQuery = effectiveSearchQuery(from: query) else {
                 queuedSearchQuery = nil
                 if !results.isEmpty {
                     results = []
@@ -28,7 +29,7 @@ final class LauncherViewModel: ObservableObject {
                 }
                 return
             }
-            triggerSearch(for: trimmedQuery)
+            triggerSearch(for: searchQuery)
         }
     }
 
@@ -58,10 +59,13 @@ final class LauncherViewModel: ObservableObject {
     private weak var editorWindow: NSWindow?
     private weak var settingsWindow: NSWindow?
 
+    var shouldShowResultsForCurrentQuery: Bool {
+        effectiveSearchQuery(from: query) != nil
+    }
+
     func initialLoad() async {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedQuery.isEmpty {
-            triggerSearch(for: trimmedQuery)
+        if let searchQuery = effectiveSearchQuery(from: query) {
+            triggerSearch(for: searchQuery)
         }
     }
 
@@ -517,15 +521,14 @@ final class LauncherViewModel: ObservableObject {
     }
 
     private func refreshSearchForCurrentQuery() {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedQuery.isEmpty else {
+        guard let searchQuery = effectiveSearchQuery(from: query) else {
             return
         }
-        triggerSearch(for: trimmedQuery)
+        triggerSearch(for: searchQuery)
     }
 
-    private func triggerSearch(for trimmedQuery: String) {
-        queuedSearchQuery = trimmedQuery
+    private func triggerSearch(for searchQuery: String) {
+        queuedSearchQuery = searchQuery
         guard !isSearchWorkerRunning else {
             return
         }
@@ -549,10 +552,11 @@ final class LauncherViewModel: ObservableObject {
 
             do {
                 let fetched = try await Task.detached(priority: .userInitiated) {
-                    try RustBridgeClient.search(query: currentQuery)
+                    let limit = currentQuery.isEmpty ? listAllSearchLimit : defaultSearchLimit
+                    return try RustBridgeClient.search(query: currentQuery, limit: limit)
                 }.value
 
-                guard currentQuery == query.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                guard effectiveSearchQuery(from: query) == .some(currentQuery) else {
                     continue
                 }
 
@@ -563,7 +567,7 @@ final class LauncherViewModel: ObservableObject {
                     errorMessage = nil
                 }
             } catch {
-                guard currentQuery == query.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                guard effectiveSearchQuery(from: query) == .some(currentQuery) else {
                     continue
                 }
                 let message = error.localizedDescription
@@ -574,6 +578,14 @@ final class LauncherViewModel: ObservableObject {
         }
 
         isSearchWorkerRunning = false
+    }
+
+    private func effectiveSearchQuery(from rawQuery: String) -> String? {
+        let trimmedQuery = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedQuery.isEmpty {
+            return rawQuery == "  " ? "" : nil
+        }
+        return trimmedQuery
     }
 
     private func clipboardImageBytes() -> Data? {
