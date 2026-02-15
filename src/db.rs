@@ -61,6 +61,16 @@ pub struct DeletedItemSummary {
     pub image_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DeletedItemPreview {
+    pub archive_key: String,
+    pub id: i64,
+    pub title: String,
+    pub note: String,
+    pub deleted_at_unix_seconds: i64,
+    pub image_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedImage {
     image_key: String,
@@ -360,14 +370,19 @@ fn read_deleted_archives(root: &Path) -> Result<Vec<DeletedArchive>> {
             continue;
         };
 
-        let payload_bytes = std::fs::read(&json_path)
-            .with_context(|| format!("failed reading deleted item payload {}", json_path.display()))?;
-        let payload: DeletedJsonItemFile = serde_json::from_slice(&payload_bytes).with_context(|| {
+        let payload_bytes = std::fs::read(&json_path).with_context(|| {
             format!(
-                "failed parsing deleted item payload JSON {}",
+                "failed reading deleted item payload {}",
                 json_path.display()
             )
         })?;
+        let payload: DeletedJsonItemFile =
+            serde_json::from_slice(&payload_bytes).with_context(|| {
+                format!(
+                    "failed parsing deleted item payload JSON {}",
+                    json_path.display()
+                )
+            })?;
 
         archives.push(DeletedArchive {
             archive_key,
@@ -393,7 +408,10 @@ fn restore_deleted_archive(store: &mut Store, archive: &DeletedArchive) -> Resul
     for image in &archive.payload.images {
         let image_path = deleted_images_dir.join(&image.file_name);
         let bytes = std::fs::read(&image_path).with_context(|| {
-            format!("failed reading deleted image during restore {}", image_path.display())
+            format!(
+                "failed reading deleted image during restore {}",
+                image_path.display()
+            )
         })?;
         restored_images.push(PersistedImage {
             image_key: image.image_key.clone(),
@@ -1476,6 +1494,36 @@ pub fn restore_deleted_item(archive_key: &str) -> Result<i64> {
         let root = store.json_storage_root();
         let archive = find_deleted_archive(&root, archive_key)?;
         restore_deleted_archive(store, &archive)
+    })
+}
+
+pub fn permanently_delete_deleted_item(archive_key: &str) -> Result<()> {
+    run_with_store(|store| {
+        let root = store.json_storage_root();
+        let archive = find_deleted_archive(&root, archive_key)?;
+        std::fs::remove_dir_all(&archive.archive_dir).with_context(|| {
+            format!(
+                "failed removing deleted archive permanently {}",
+                archive.archive_dir.display()
+            )
+        })?;
+        Ok(())
+    })
+}
+
+pub fn get_deleted_item_preview(archive_key: &str) -> Result<DeletedItemPreview> {
+    run_with_store(|store| {
+        let root = store.json_storage_root();
+        let archive = find_deleted_archive(&root, archive_key)?;
+        Ok(DeletedItemPreview {
+            archive_key: archive.archive_key,
+            id: archive.payload.id,
+            title: archive.payload.title,
+            note: archive.payload.note,
+            deleted_at_unix_seconds: i64::try_from(archive.payload.deleted_at_unix_seconds)
+                .unwrap_or(i64::MAX),
+            image_count: archive.payload.images.len() as i64,
+        })
     })
 }
 

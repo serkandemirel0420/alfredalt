@@ -56,6 +56,16 @@ pub struct DeletedItemRecord {
     pub image_count: i64,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DeletedItemPreviewRecord {
+    pub archive_key: String,
+    pub id: i64,
+    pub title: String,
+    pub note: String,
+    pub deleted_at_unix_seconds: i64,
+    pub image_count: i64,
+}
+
 impl From<SearchResult> for SearchResultRecord {
     fn from(value: SearchResult) -> Self {
         Self {
@@ -126,6 +136,19 @@ impl From<db::DeletedItemSummary> for DeletedItemRecord {
     }
 }
 
+impl From<db::DeletedItemPreview> for DeletedItemPreviewRecord {
+    fn from(value: db::DeletedItemPreview) -> Self {
+        Self {
+            archive_key: value.archive_key,
+            id: value.id,
+            title: value.title,
+            note: value.note,
+            deleted_at_unix_seconds: value.deleted_at_unix_seconds,
+            image_count: value.image_count,
+        }
+    }
+}
+
 #[uniffi::export]
 pub fn backend_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -143,7 +166,7 @@ pub fn search_items(
     } else {
         query
     };
-    
+
     let limit = normalize_limit(limit)?;
     let results = db::search(&query, i64::from(limit)).map_err(map_anyhow)?;
     Ok(results.into_iter().map(SearchResultRecord::from).collect())
@@ -155,13 +178,13 @@ pub fn create_item(title: String) -> Result<i64, BackendError> {
     const MAX_TITLE_LENGTH: usize = 10_000; // 10KB limit for title
     let title = sanitize_title(&title);
     let title = title.trim();
-    
+
     if title.is_empty() {
         return Err(BackendError::Validation(
             "title must not be empty".to_string(),
         ));
     }
-    
+
     if title.len() > MAX_TITLE_LENGTH {
         return Err(BackendError::Validation(
             "title exceeds maximum length".to_string(),
@@ -322,6 +345,31 @@ pub fn restore_deleted_item(archive_key: String) -> Result<i64, BackendError> {
         ));
     }
     db::restore_deleted_item(archive_key).map_err(map_anyhow)
+}
+
+#[uniffi::export]
+pub fn permanently_delete_deleted_item(archive_key: String) -> Result<(), BackendError> {
+    let archive_key = archive_key.trim();
+    if archive_key.is_empty() {
+        return Err(BackendError::Validation(
+            "archive_key must not be empty".to_string(),
+        ));
+    }
+    db::permanently_delete_deleted_item(archive_key).map_err(map_anyhow)
+}
+
+#[uniffi::export]
+pub fn get_deleted_item_preview(
+    archive_key: String,
+) -> Result<DeletedItemPreviewRecord, BackendError> {
+    let archive_key = archive_key.trim();
+    if archive_key.is_empty() {
+        return Err(BackendError::Validation(
+            "archive_key must not be empty".to_string(),
+        ));
+    }
+    let preview = db::get_deleted_item_preview(archive_key).map_err(map_anyhow)?;
+    Ok(DeletedItemPreviewRecord::from(preview))
 }
 
 #[uniffi::export]

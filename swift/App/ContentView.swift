@@ -590,7 +590,7 @@ struct EditorWindowView: View {
 
     var body: some View {
         Group {
-            if viewModel.selectedItem == nil {
+            if viewModel.selectedItem == nil && viewModel.deletedPreviewItem == nil {
                 VStack(spacing: 10) {
                     Text("No item selected")
                         .font(.system(size: 17, weight: .semibold))
@@ -968,6 +968,7 @@ struct SettingsWindowView: View {
     @StateObject private var hotKeyManager = HotKeyManager.shared
     @FocusState private var pathFieldFocused: Bool
     @State private var selectedTab: SettingsTab = .general
+    @Environment(\.openWindow) private var openWindow
     
     enum SettingsTab: String, CaseIterable, Identifiable {
         case general = "General"
@@ -1230,20 +1231,36 @@ struct SettingsWindowView: View {
                     ForEach(Array(viewModel.deletedItems.prefix(8)), id: \.archiveKey) { item in
                         HStack(spacing: 8) {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(item.title)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .lineLimit(1)
+                                Button(item.title) {
+                                    presentDeletedItemPreview(item)
+                                }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 13, weight: .medium))
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .onHover { hovering in
+                                    if hovering {
+                                        NSCursor.pointingHand.set()
+                                    } else {
+                                        NSCursor.arrow.set()
+                                    }
+                                }
                                 Text("Deleted \(deletedItemDateString(item.deletedAtUnixSeconds)) • \(item.imageCount) image(s)")
                                     .font(.system(size: 11))
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
                             Button("Restore") {
+                                openDeletedItemInEditor(item)
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            Button("Delete Forever") {
                                 Task {
-                                    await viewModel.restoreDeletedItem(archiveKey: item.archiveKey)
+                                    await viewModel.permanentlyDeleteDeletedItem(archiveKey: item.archiveKey)
                                 }
                             }
                             .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(themeManager.colors.errorColor)
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 8)
@@ -1320,7 +1337,36 @@ struct SettingsWindowView: View {
         formatter.timeStyle = .short
         return formatter
     }()
-    
+
+    private func presentDeletedItemPreview(_ item: DeletedItemRecord) {
+        Task {
+            guard await viewModel.openDeletedItemPreview(archiveKey: item.archiveKey) else {
+                return
+            }
+
+            dismissWindow(id: "settings")
+            viewModel.beginEditorPresentation()
+            openWindow(id: "editor")
+        }
+    }
+
+    private func openDeletedItemInEditor(_ item: DeletedItemRecord) {
+        Task {
+            guard let restoredItemId = await viewModel.restoreDeletedItem(archiveKey: item.archiveKey) else {
+                return
+            }
+
+            let opened = await viewModel.open(itemId: restoredItemId)
+            guard opened else {
+                return
+            }
+
+            dismissWindow(id: "settings")
+            viewModel.beginEditorPresentation()
+            openWindow(id: "editor")
+        }
+    }
+
     private var appearanceTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -1943,6 +1989,10 @@ private struct EditorSheet: View {
     @State private var draftTitle: String = ""
     @State private var titleSaveTask: Task<Void, Never>?
 
+    private var isDeletedPreviewMode: Bool {
+        viewModel.deletedPreviewItem != nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             TextField("Title", text: $draftTitle)
@@ -1950,13 +2000,20 @@ private struct EditorSheet: View {
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundStyle(themeManager.colors.itemTitleText)
                 .focused($titleFieldFocused)
+                .disabled(isDeletedPreviewMode)
                 .onSubmit {
+                    guard !isDeletedPreviewMode else {
+                        return
+                    }
                     scheduleTitleSave(immediate: true)
                 }
 
             InlineImageTextEditor(
                 text: $viewModel.editorText,
-                imagesByKey: Dictionary(uniqueKeysWithValues: (viewModel.selectedItem?.images ?? []).map { ($0.imageKey, $0.bytes) }),
+                imagesByKey: isDeletedPreviewMode
+                    ? [:]
+                    : Dictionary(uniqueKeysWithValues: (viewModel.selectedItem?.images ?? []).map { ($0.imageKey, $0.bytes) }),
+                isEditable: !isDeletedPreviewMode,
                 searchQuery: viewModel.query,
                 highlightSearchMatches: themeManager.editorSearchHighlightsEnabled,
                 dividerColor: themeManager.editorDividerColor,
@@ -1976,6 +2033,30 @@ private struct EditorSheet: View {
             .padding(10)
             .background(themeManager.colors.editorTextBackground)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            if let preview = viewModel.deletedPreviewItem {
+                HStack {
+                    Button("Delete Forever", role: .destructive) {
+                        Task {
+                            await viewModel.permanentlyDeleteDeletedItem(archiveKey: preview.archiveKey)
+                            closeEditorWindow()
+                        }
+                    }
+
+                    Spacer()
+
+                    Button("Restore") {
+                        Task {
+                            guard let restoredItemId = await viewModel.restoreDeletedItem(archiveKey: preview.archiveKey) else {
+                                return
+                            }
+                            _ = await viewModel.open(itemId: restoredItemId)
+                            viewModel.requestEditorTitleFocus()
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
         }
         .padding(16)
         .frame(minWidth: 760, minHeight: 500)
@@ -1984,17 +2065,23 @@ private struct EditorSheet: View {
             KeyEventMonitor { event in
                 handleEditorKeyEvent(event)
             } onOptionDoubleTap: {
+                guard !isDeletedPreviewMode else {
+                    return
+                }
                 themeManager.toggleEditorSearchHighlightsEnabled()
             }
         )
         .onChange(of: viewModel.editorText) { _, _ in
+            guard !isDeletedPreviewMode else {
+                return
+            }
             viewModel.scheduleAutosave()
         }
         .onAppear {
             isClosingEditor = false
             refreshDocumentFontSize()
             refreshDraftTitle()
-            if viewModel.consumeEditorTitleFocusRequest() {
+            if !isDeletedPreviewMode, viewModel.consumeEditorTitleFocusRequest() {
                 titleFieldFocused = true
             }
         }
@@ -2002,21 +2089,35 @@ private struct EditorSheet: View {
             refreshDocumentFontSize()
             refreshDraftTitle()
         }
+        .onChange(of: viewModel.deletedPreviewItem?.archiveKey) { _, _ in
+            refreshDocumentFontSize()
+            refreshDraftTitle()
+        }
         .onChange(of: viewModel.selectedItem?.title) { _, newValue in
             guard !titleFieldFocused else {
+                return
+            }
+            guard !isDeletedPreviewMode else {
+                draftTitle = viewModel.deletedPreviewItem?.title ?? ""
                 return
             }
             draftTitle = newValue ?? ""
         }
         .onChange(of: draftTitle) { _, _ in
+            guard !isDeletedPreviewMode else {
+                return
+            }
             scheduleTitleSave(immediate: false)
         }
         .onChange(of: viewModel.editorTitleFocusRequestID) { _, _ in
-            if viewModel.consumeEditorTitleFocusRequest() {
+            if !isDeletedPreviewMode, viewModel.consumeEditorTitleFocusRequest() {
                 titleFieldFocused = true
             }
         }
         .onChange(of: documentFontSize) { _, newValue in
+            guard !isDeletedPreviewMode else {
+                return
+            }
             persistDocumentFontSize(newValue)
         }
         .onDisappear {
@@ -2024,6 +2125,12 @@ private struct EditorSheet: View {
             if isClosingEditor {
                 return
             }
+
+            guard !isDeletedPreviewMode else {
+                viewModel.clearDeletedItemPreview()
+                return
+            }
+
             Task {
                 await commitTitleIfNeeded()
                 await viewModel.flushAutosave()
@@ -2037,7 +2144,8 @@ private struct EditorSheet: View {
     private func handleEditorKeyEvent(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(keyHandlingModifierMask)
 
-        if modifiers == [.command],
+        if !isDeletedPreviewMode,
+           modifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "v",
            viewModel.hasImageInClipboard() {
             Task { await viewModel.pasteImageFromClipboard(at: editorCursorCharIndex) }
@@ -2067,6 +2175,13 @@ private struct EditorSheet: View {
         isClosingEditor = true
         Task { @MainActor in
             titleSaveTask?.cancel()
+
+            if isDeletedPreviewMode {
+                viewModel.clearDeletedItemPreview()
+                dismissWindow(id: "editor")
+                return
+            }
+
             await commitTitleIfNeeded()
             dismissWindow(id: "editor")
             _ = await viewModel.flushAutosave()
@@ -2074,6 +2189,10 @@ private struct EditorSheet: View {
     }
 
     private func refreshDraftTitle() {
+        if let preview = viewModel.deletedPreviewItem {
+            draftTitle = preview.title
+            return
+        }
         draftTitle = viewModel.selectedItem?.title ?? ""
     }
 
@@ -2097,6 +2216,10 @@ private struct EditorSheet: View {
     }
 
     private func commitTitleIfNeeded() async {
+        guard !isDeletedPreviewMode else {
+            return
+        }
+
         guard let currentTitle = viewModel.selectedItem?.title else {
             return
         }
@@ -2127,6 +2250,10 @@ private struct EditorSheet: View {
 
     private func refreshDocumentFontSize() {
         let base = themeManager.editorFontSize
+        guard !isDeletedPreviewMode else {
+            documentFontSize = base
+            return
+        }
         guard let itemId = viewModel.selectedItem?.id else {
             documentFontSize = base
             return

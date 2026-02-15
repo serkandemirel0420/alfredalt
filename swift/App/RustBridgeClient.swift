@@ -45,6 +45,14 @@ enum RustBridgeClient {
         try restoreDeletedItem(archiveKey: archiveKey)
     }
 
+    static func permanentlyDeleteDeleted(archiveKey: String) throws {
+        try permanentlyDeleteDeletedItem(archiveKey: archiveKey)
+    }
+
+    static func deletedPreview(archiveKey: String) throws -> DeletedItemPreviewRecord {
+        try getDeletedItemPreview(archiveKey: archiveKey)
+    }
+
     static func getJsonPath(itemId: Int64) throws -> String {
         try getItemJsonPath(itemId: itemId)
     }

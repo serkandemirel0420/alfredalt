@@ -1336,6 +1336,7 @@ private protocol ImageResizeDelegate: AnyObject {
 struct InlineImageTextEditor: NSViewRepresentable {
     @Binding var text: String
     var imagesByKey: [String: Data]
+    var isEditable: Bool = true
     var searchQuery: String = ""
     var highlightSearchMatches: Bool = true
     var dividerColor: Color = Color(red: 0.72, green: 0.86, blue: 0.98)
@@ -1367,7 +1368,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.resizeDelegate = context.coordinator
         textView.commandDelegate = context.coordinator
-        textView.isEditable = true
+        textView.isEditable = isEditable
         textView.isSelectable = true
         // Note: isRichText is left as default (true) to allow formatting.
         // Paste normalization (see paste(_:) overrides) handles stripping unwanted HTML.
@@ -1435,6 +1436,7 @@ struct InlineImageTextEditor: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.textView?.isEditable = isEditable
         context.coordinator.renderIfNeeded(force: false)
         
         // Update minimap search query

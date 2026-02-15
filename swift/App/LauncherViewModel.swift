@@ -52,6 +52,7 @@ final class LauncherViewModel: ObservableObject {
     @Published var settingsSuccessMessage: String?
     @Published private(set) var deletedItems: [DeletedItemRecord] = []
     @Published private(set) var isLoadingDeletedItems: Bool = false
+    @Published private(set) var deletedPreviewItem: DeletedItemPreviewRecord?
 
     private var queuedSearchQuery: String?
     private var isSearchWorkerRunning = false
@@ -194,20 +195,74 @@ final class LauncherViewModel: ObservableObject {
         }
     }
 
-    func restoreDeletedItem(archiveKey: String) async {
+    func restoreDeletedItem(archiveKey: String) async -> Int64? {
         do {
-            _ = try await Task.detached(priority: .userInitiated) {
+            let restoredId = try await Task.detached(priority: .userInitiated) {
                 try RustBridgeClient.restoreDeleted(archiveKey: archiveKey)
             }.value
 
+            if deletedPreviewItem?.archiveKey == archiveKey {
+                deletedPreviewItem = nil
+            }
             settingsErrorMessage = nil
             settingsSuccessMessage = "Restored."
             refreshDeletedItems()
             refreshSearchForCurrentQuery()
+            return restoredId
+        } catch {
+            settingsErrorMessage = error.localizedDescription
+            settingsSuccessMessage = nil
+            return nil
+        }
+    }
+
+    func permanentlyDeleteDeletedItem(archiveKey: String) async {
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try RustBridgeClient.permanentlyDeleteDeleted(archiveKey: archiveKey)
+            }.value
+
+            if deletedPreviewItem?.archiveKey == archiveKey {
+                deletedPreviewItem = nil
+            }
+            settingsErrorMessage = nil
+            settingsSuccessMessage = "Deleted permanently."
+            refreshDeletedItems()
         } catch {
             settingsErrorMessage = error.localizedDescription
             settingsSuccessMessage = nil
         }
+    }
+
+    func fetchDeletedItemPreview(archiveKey: String) async -> DeletedItemPreviewRecord? {
+        do {
+            let preview = try await Task.detached(priority: .userInitiated) {
+                try RustBridgeClient.deletedPreview(archiveKey: archiveKey)
+            }.value
+
+            settingsErrorMessage = nil
+            return preview
+        } catch {
+            settingsErrorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
+    func openDeletedItemPreview(archiveKey: String) async -> Bool {
+        guard let preview = await fetchDeletedItemPreview(archiveKey: archiveKey) else {
+            return false
+        }
+        autosaveTask?.cancel()
+        autosaveTask = nil
+        deletedPreviewItem = preview
+        selectedItem = nil
+        editorText = preview.note
+        errorMessage = nil
+        return true
+    }
+
+    func clearDeletedItemPreview() {
+        deletedPreviewItem = nil
     }
 
     func openDeletedItemsFolder() {
@@ -304,6 +359,7 @@ final class LauncherViewModel: ObservableObject {
         }
 
         isEditorPresented = false
+        deletedPreviewItem = nil
         NSApp.activate(ignoringOtherApps: true)
         launcherWindow?.makeKeyAndOrderFront(nil)
         launcherWindow?.orderFrontRegardless()
@@ -316,6 +372,7 @@ final class LauncherViewModel: ObservableObject {
 
         do {
             let item = try RustBridgeClient.fetch(itemId: itemId)
+            deletedPreviewItem = nil
             selectedItem = item
             editorText = item.note
             errorMessage = nil

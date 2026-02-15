@@ -489,6 +489,108 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 }
 
 
+public struct DeletedItemPreviewRecord {
+    public var archiveKey: String
+    public var id: Int64
+    public var title: String
+    public var note: String
+    public var deletedAtUnixSeconds: Int64
+    public var imageCount: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(archiveKey: String, id: Int64, title: String, note: String, deletedAtUnixSeconds: Int64, imageCount: Int64) {
+        self.archiveKey = archiveKey
+        self.id = id
+        self.title = title
+        self.note = note
+        self.deletedAtUnixSeconds = deletedAtUnixSeconds
+        self.imageCount = imageCount
+    }
+}
+
+#if compiler(>=6)
+extension DeletedItemPreviewRecord: Sendable {}
+#endif
+
+
+extension DeletedItemPreviewRecord: Equatable, Hashable {
+    public static func ==(lhs: DeletedItemPreviewRecord, rhs: DeletedItemPreviewRecord) -> Bool {
+        if lhs.archiveKey != rhs.archiveKey {
+            return false
+        }
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.title != rhs.title {
+            return false
+        }
+        if lhs.note != rhs.note {
+            return false
+        }
+        if lhs.deletedAtUnixSeconds != rhs.deletedAtUnixSeconds {
+            return false
+        }
+        if lhs.imageCount != rhs.imageCount {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(archiveKey)
+        hasher.combine(id)
+        hasher.combine(title)
+        hasher.combine(note)
+        hasher.combine(deletedAtUnixSeconds)
+        hasher.combine(imageCount)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeletedItemPreviewRecord: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeletedItemPreviewRecord {
+        return
+            try DeletedItemPreviewRecord(
+                archiveKey: FfiConverterString.read(from: &buf), 
+                id: FfiConverterInt64.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                note: FfiConverterString.read(from: &buf), 
+                deletedAtUnixSeconds: FfiConverterInt64.read(from: &buf), 
+                imageCount: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeletedItemPreviewRecord, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.archiveKey, into: &buf)
+        FfiConverterInt64.write(value.id, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.note, into: &buf)
+        FfiConverterInt64.write(value.deletedAtUnixSeconds, into: &buf)
+        FfiConverterInt64.write(value.imageCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeletedItemPreviewRecord_lift(_ buf: RustBuffer) throws -> DeletedItemPreviewRecord {
+    return try FfiConverterTypeDeletedItemPreviewRecord.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeletedItemPreviewRecord_lower(_ value: DeletedItemPreviewRecord) -> RustBuffer {
+    return FfiConverterTypeDeletedItemPreviewRecord.lower(value)
+}
+
+
 public struct DeletedItemRecord {
     public var archiveKey: String
     public var id: Int64
@@ -1202,6 +1304,13 @@ public func exportItems()throws  -> [ExportItemRecord]  {
     )
 })
 }
+public func getDeletedItemPreview(archiveKey: String)throws  -> DeletedItemPreviewRecord  {
+    return try  FfiConverterTypeDeletedItemPreviewRecord_lift(try rustCallWithError(FfiConverterTypeBackendError_lift) {
+    uniffi_alfred_alt_fn_func_get_deleted_item_preview(
+        FfiConverterString.lower(archiveKey),$0
+    )
+})
+}
 public func getItem(itemId: Int64)throws  -> EditableItemRecord  {
     return try  FfiConverterTypeEditableItemRecord_lift(try rustCallWithError(FfiConverterTypeBackendError_lift) {
     uniffi_alfred_alt_fn_func_get_item(
@@ -1234,6 +1343,12 @@ public func loadJsonStoragePath()throws  -> String  {
     uniffi_alfred_alt_fn_func_load_json_storage_path($0
     )
 })
+}
+public func permanentlyDeleteDeletedItem(archiveKey: String)throws   {try rustCallWithError(FfiConverterTypeBackendError_lift) {
+    uniffi_alfred_alt_fn_func_permanently_delete_deleted_item(
+        FfiConverterString.lower(archiveKey),$0
+    )
+}
 }
 public func renameItem(itemId: Int64, title: String)throws   {try rustCallWithError(FfiConverterTypeBackendError_lift) {
     uniffi_alfred_alt_fn_func_rename_item(
@@ -1305,6 +1420,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_alfred_alt_checksum_func_export_items() != 36696) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_alfred_alt_checksum_func_get_deleted_item_preview() != 22060) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_alfred_alt_checksum_func_get_item() != 23813) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1318,6 +1436,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_alfred_alt_checksum_func_load_json_storage_path() != 17743) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_alfred_alt_checksum_func_permanently_delete_deleted_item() != 8099) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_alfred_alt_checksum_func_rename_item() != 28376) {

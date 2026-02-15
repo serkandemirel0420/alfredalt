@@ -273,6 +273,11 @@ RustBuffer uniffi_alfred_alt_fn_func_export_items(RustCallStatus *_Nonnull out_s
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_GET_DELETED_ITEM_PREVIEW
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_GET_DELETED_ITEM_PREVIEW
+RustBuffer uniffi_alfred_alt_fn_func_get_deleted_item_preview(RustBuffer archive_key, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_GET_ITEM
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_GET_ITEM
 RustBuffer uniffi_alfred_alt_fn_func_get_item(int64_t item_id, RustCallStatus *_Nonnull out_status
@@ -298,6 +303,11 @@ RustBuffer uniffi_alfred_alt_fn_func_load_hotkey(RustCallStatus *_Nonnull out_st
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_LOAD_JSON_STORAGE_PATH
 RustBuffer uniffi_alfred_alt_fn_func_load_json_storage_path(RustCallStatus *_Nonnull out_status
     
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_PERMANENTLY_DELETE_DELETED_ITEM
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_PERMANENTLY_DELETE_DELETED_ITEM
+void uniffi_alfred_alt_fn_func_permanently_delete_deleted_item(RustBuffer archive_key, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_RENAME_ITEM
@@ -634,6 +644,12 @@ uint16_t uniffi_alfred_alt_checksum_func_export_items(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_GET_DELETED_ITEM_PREVIEW
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_GET_DELETED_ITEM_PREVIEW
+uint16_t uniffi_alfred_alt_checksum_func_get_deleted_item_preview(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_GET_ITEM
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_GET_ITEM
 uint16_t uniffi_alfred_alt_checksum_func_get_item(void
@@ -661,6 +677,12 @@ uint16_t uniffi_alfred_alt_checksum_func_load_hotkey(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LOAD_JSON_STORAGE_PATH
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LOAD_JSON_STORAGE_PATH
 uint16_t uniffi_alfred_alt_checksum_func_load_json_storage_path(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_PERMANENTLY_DELETE_DELETED_ITEM
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_PERMANENTLY_DELETE_DELETED_ITEM
+uint16_t uniffi_alfred_alt_checksum_func_permanently_delete_deleted_item(void
     
 );
 #endif
