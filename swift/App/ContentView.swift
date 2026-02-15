@@ -1032,9 +1032,15 @@ struct SettingsWindowView: View {
             viewModel.loadSettingsStorageDirectoryPath()
             viewModel.reloadSettingsFromDisk()
             viewModel.settingsDidOpen()
+            updateChecker.checkForUpdate()
         }
         .onDisappear {
             viewModel.settingsDidClose()
+        }
+        .onChange(of: selectedTab) { _, newTab in
+            if newTab == .general {
+                updateChecker.checkForUpdate()
+            }
         }
         .onChange(of: viewModel.settingsStorageDirectoryPath) { _, _ in
             if viewModel.settingsSuccessMessage != nil {
@@ -1047,13 +1053,13 @@ struct SettingsWindowView: View {
                 dismissWindow(id: "settings")
             }
         )
-        .alert("Update Available", isPresented: $autoUpdater.showRestartAlert) {
+        .alert("Restart to Update", isPresented: $autoUpdater.showRestartAlert) {
             Button("Restart Now") {
                 autoUpdater.restartApp()
             }
             Button("Later", role: .cancel) {}
         } message: {
-            Text("The update has been installed. Restart the app to apply the changes.")
+            Text("The update is ready. Restart now to finish installing the new version.")
         }
         .alert("Update Failed", isPresented: $autoUpdater.showErrorAlert) {
             Button("OK", role: .cancel) {}
@@ -1188,6 +1194,7 @@ struct SettingsWindowView: View {
                     }
                 }
             }
+            .id(updateStatusViewID)
             
             
             Divider()
@@ -1236,6 +1243,16 @@ struct SettingsWindowView: View {
 
             Spacer()
         }
+    }
+
+    private var updateStatusViewID: String {
+        [
+            String(autoUpdater.isUpdating),
+            autoUpdater.errorMessage,
+            String(updateChecker.isChecking),
+            String(updateChecker.updateAvailable),
+            updateChecker.latestVersion ?? ""
+        ].joined(separator: "|")
     }
     
     private var appearanceTab: some View {

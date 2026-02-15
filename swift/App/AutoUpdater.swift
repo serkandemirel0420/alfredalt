@@ -18,6 +18,25 @@ final class AutoUpdater: ObservableObject {
     private var currentAppPath: String {
         Bundle.main.bundlePath
     }
+
+    private var installTargetAppPath: String {
+        let currentPath = currentAppPath
+        guard currentPath.contains("/AppTranslocation/") else {
+            return currentPath
+        }
+
+        let appName = (currentPath as NSString).lastPathComponent
+        let candidates = [
+            "/Applications/\(appName)",
+            "\(NSHomeDirectory())/Applications/\(appName)"
+        ]
+
+        for path in candidates where FileManager.default.fileExists(atPath: path) {
+            return path
+        }
+
+        return candidates[1]
+    }
     
     func promptForUpdate(version: String, downloadURL: URL) {
         newVersion = version
@@ -37,6 +56,7 @@ final class AutoUpdater: ObservableObject {
             do {
                 print("[AutoUpdater] Starting update to version: \(version)")
                 print("[AutoUpdater] Current app path: \(currentAppPath)")
+                print("[AutoUpdater] Install target path: \(installTargetAppPath)")
                 
                 // Step 1: Download DMG
                 print("[AutoUpdater] Downloading from: \(downloadURL)")
@@ -45,20 +65,13 @@ final class AutoUpdater: ObservableObject {
                 print("[AutoUpdater] Downloaded to: \(dmgURL.path)")
                 
                 await MainActor.run {
-                    updateProgress = "Mounting update..."
+                    updateProgress = "Preparing installer..."
                 }
                 
-                // Step 2: Verify DMG and find app
-                let (mountPoint, appPath) = try await mountAndFindApp(dmgURL: dmgURL)
-                print("[AutoUpdater] Found app at: \(appPath)")
-                
-                await MainActor.run {
-                    updateProgress = "Installing update..."
-                }
-                
-                // Step 3: Create and run update script
-                try await runUpdateScript(dmgURL: dmgURL, mountPoint: mountPoint, appPath: appPath)
-                print("[AutoUpdater] Update script started")
+                // Step 2: Prepare deferred installer and wait for user restart.
+                let scriptURL = try createDeferredInstallScript(dmgURL: dmgURL)
+                try launchUpdateScript(scriptURL)
+                print("[AutoUpdater] Deferred installer launched: \(scriptURL.path)")
                 
                 await MainActor.run {
                     isUpdating = false
@@ -97,202 +110,110 @@ final class AutoUpdater: ObservableObject {
         try data.write(to: dmgURL)
         return dmgURL
     }
-    
-    private func mountAndFindApp(dmgURL: URL) async throws -> (mountPoint: URL, appPath: String) {
-        let mountPoint = FileManager.default.temporaryDirectory
-            .appendingPathComponent("alfred_update_\(Int(Date().timeIntervalSince1970))")
-        
-        // Clean up any previous attempts
-        _ = try? await runScript("hdiutil detach \"\(mountPoint.path)\" -force 2>/dev/null; rm -rf \"\(mountPoint.path)\"")
-        
-        // Create mount directory
-        try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
-        
-        // Mount DMG
-        let mountOutput = try await runScript("hdiutil attach \"\(dmgURL.path)\" -mountpoint \"\(mountPoint.path)\" -nobrowse")
-        print("[AutoUpdater] Mount output: \(mountOutput)")
-        
-        guard !mountOutput.isEmpty else {
-            throw UpdateError.mountFailed("Empty mount output")
-        }
-        
-        // Find the app in the mounted DMG
-        let appName = "AlfredAlternative.app"
-        let mountedAppPath = mountPoint.appendingPathComponent(appName).path
-        
-        var appPath = mountedAppPath
-        
-        if !FileManager.default.fileExists(atPath: appPath) {
-            print("[AutoUpdater] App not at root, searching subdirectories...")
-            // Try to find it in subdirectories
-            let contents = try? FileManager.default.contentsOfDirectory(atPath: mountPoint.path)
-            var foundApp = false
-            for item in contents ?? [] {
-                let itemPath = mountPoint.appendingPathComponent(item).path
-                var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: itemPath, isDirectory: &isDir) && isDir.boolValue {
-                    let potentialApp = (item as NSString).appendingPathComponent(appName)
-                    let potentialPath = mountPoint.appendingPathComponent(potentialApp).path
-                    if FileManager.default.fileExists(atPath: potentialPath) {
-                        appPath = potentialPath
-                        foundApp = true
-                        print("[AutoUpdater] Found app in subdirectory: \(item)")
-                        break
-                    }
-                }
-            }
-            
-            if !foundApp {
-                _ = try? await runScript("hdiutil detach \"\(mountPoint.path)\" -force 2>/dev/null")
-                throw UpdateError.appNotFound("Searched in: \(contents?.joined(separator: ", ") ?? "none")")
-            }
-        }
-        
-        return (mountPoint, appPath)
-    }
-    
-    private func runUpdateScript(dmgURL: URL, mountPoint: URL, appPath: String) async throws {
+
+    private func createDeferredInstallScript(dmgURL: URL) throws -> URL {
         let scriptURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("alfred_update_\(Int(Date().timeIntervalSince1970)).sh")
-        
-        // Create update script with detailed logging
+
+        let targetPath = installTargetAppPath
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let quotedTarget = shellEscaped(targetPath)
+        let quotedDMG = shellEscaped(dmgURL.path)
+        let quotedScript = shellEscaped(scriptURL.path)
+
         let scriptContent = """
         #!/bin/bash
-        set -e
-        
+        set -euo pipefail
+
         LOG_FILE="/tmp/alfred_update_$(date +%s).log"
         exec > "$LOG_FILE" 2>&1
-        
+
+        TARGET_APP=\(quotedTarget)
+        DMG_PATH=\(quotedDMG)
+        SELF_SCRIPT=\(quotedScript)
+        CURRENT_PID=\(currentPID)
+        MOUNT_POINT="$(mktemp -d /tmp/alfred_update_mount.XXXXXX)"
+        WORK_DIR="$(mktemp -d /tmp/alfred_update_work.XXXXXX)"
+
+        cleanup() {
+            hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true
+            rm -rf "$MOUNT_POINT" "$WORK_DIR"
+            rm -f "$DMG_PATH" "$SELF_SCRIPT"
+        }
+        trap cleanup EXIT
+
         echo "=== Alfred Alternative Updater ==="
         echo "Started at: $(date)"
-        echo "Current app: \(currentAppPath)"
-        echo "New app: \(appPath)"
-        
-        sleep 3
-        
-        # Check if source exists
-        if [ ! -d "\(appPath)" ]; then
-            echo "ERROR: Source app not found at \(appPath)"
-            exit 1
-        fi
-        
-        # Unmount first (in case still mounted)
-        echo "Unmounting..."
-        hdiutil detach "\(mountPoint.path)" -force 2>/dev/null || true
-        
-        # Mount again to be sure
-        echo "Mounting DMG..."
-        hdiutil attach "\(dmgURL.path)" -mountpoint "\(mountPoint.path)" -nobrowse
-        
-        # Verify source still exists after remount
-        if [ ! -d "\(appPath)" ]; then
-            echo "ERROR: Source app not found after remount"
-            exit 1
-        fi
-        
-        # Remove old app
-        echo "Removing old app..."
-        rm -rf "\(currentAppPath)"
-        
-        # Copy new app
-        echo "Copying new app..."
-        cp -R "\(appPath)" "\(currentAppPath)"
-        
-        # Verify copy succeeded
-        if [ ! -d "\(currentAppPath)" ]; then
-            echo "ERROR: Copy failed"
+        echo "Current PID: $CURRENT_PID"
+        echo "Target app: $TARGET_APP"
+        echo "DMG: $DMG_PATH"
+
+        while kill -0 "$CURRENT_PID" >/dev/null 2>&1; do
+            sleep 0.25
+        done
+        echo "Main app exited, continuing update."
+
+        if [ ! -f "$DMG_PATH" ]; then
+            echo "ERROR: DMG not found: $DMG_PATH"
             exit 1
         fi
 
-        # Defensive fallback: clear quarantine if present.
-        # Not needed for properly notarized builds, but prevents manual xattr steps
-        # when users update from non-notarized artifacts.
-        xattr -dr com.apple.quarantine "\(currentAppPath)" 2>/dev/null || true
-        
-        echo "Copy successful"
-        
-        # Unmount DMG
-        echo "Unmounting DMG..."
-        hdiutil detach "\(mountPoint.path)" -force 2>/dev/null || true
-        
-        # Remove downloaded DMG
-        echo "Cleaning up..."
-        rm -f "\(dmgURL.path)"
-        rm -f "\(scriptURL.path)"
-        
-        # Restart app
-        echo "Restarting app..."
-        open "\(currentAppPath)"
-        
-        echo "Done at: $(date)"
+        hdiutil attach "$DMG_PATH" -mountpoint "$MOUNT_POINT" -nobrowse -readonly
+
+        SOURCE_APP="$(find "$MOUNT_POINT" -maxdepth 3 -type d -name 'AlfredAlternative.app' | head -n 1)"
+        if [ -z "$SOURCE_APP" ]; then
+            echo "ERROR: AlfredAlternative.app not found in mounted DMG"
+            exit 1
+        fi
+
+        NEW_APP="$WORK_DIR/AlfredAlternative.app"
+        ditto "$SOURCE_APP" "$NEW_APP"
+        xattr -dr com.apple.quarantine "$NEW_APP" 2>/dev/null || true
+
+        mkdir -p "$(dirname "$TARGET_APP")"
+        rm -rf "$TARGET_APP"
+        mv "$NEW_APP" "$TARGET_APP"
+
+        open "$TARGET_APP"
+        echo "Update complete at: $(date)"
         """
-        
+
         try scriptContent.write(to: scriptURL, atomically: true, encoding: .utf8)
-        
-        // Make script executable
-        _ = try await runScript("chmod +x \"\(scriptURL.path)\"")
-        
-        // Run the update script - it will run synchronously until it backgrounds itself
-        // We use a different approach: run it in a way that allows it to continue after we exit
-        let launcherScript = """
-        nohup "\(scriptURL.path)" > /dev/null 2>&1 &
-        disown
-        """
-        
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    private func launchUpdateScript(_ scriptURL: URL) throws {
+        let launcherScript = "nohup \(shellEscaped(scriptURL.path)) > /dev/null 2>&1 &"
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/bash")
         process.arguments = ["-c", launcherScript]
         try process.run()
         process.waitUntilExit()
-        
-        // Give the script a moment to start
-        try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+
+        guard process.terminationStatus == 0 else {
+            throw UpdateError.scriptFailed("failed to launch installer script (exit \(process.terminationStatus))")
+        }
     }
     
     func restartApp() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", "sleep 1; open \"\(currentAppPath)\""]
-        try? process.run()
         NSApp.terminate(nil)
     }
-    
-    private func runScript(_ script: String) async throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = ["-c", script]
-        
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        
-        try process.run()
-        process.waitUntilExit()
-        
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8) ?? ""
-        
-        guard process.terminationStatus == 0 else {
-            throw UpdateError.scriptFailed("Exit code \(process.terminationStatus): \(output)")
-        }
-        
-        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    private func shellEscaped(_ value: String) -> String {
+        let escaped = value.replacingOccurrences(of: "'", with: "'\\''")
+        return "'\(escaped)'"
     }
     
     enum UpdateError: LocalizedError {
         case downloadFailed(String)
-        case mountFailed(String)
-        case appNotFound(String)
         case scriptFailed(String)
         
         var errorDescription: String? {
             switch self {
             case .downloadFailed(let reason):
                 return "Download failed: \(reason)"
-            case .mountFailed(let reason):
-                return "Mount failed: \(reason)"
-            case .appNotFound(let reason):
-                return "App not found: \(reason)"
             case .scriptFailed(let output):
                 return "Installation failed: \(output)"
             }
