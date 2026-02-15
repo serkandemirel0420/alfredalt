@@ -47,6 +47,15 @@ pub struct ExportItemRecord {
     pub image_count: i64,
 }
 
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct DeletedItemRecord {
+    pub archive_key: String,
+    pub id: i64,
+    pub title: String,
+    pub deleted_at_unix_seconds: i64,
+    pub image_count: i64,
+}
+
 impl From<SearchResult> for SearchResultRecord {
     fn from(value: SearchResult) -> Self {
         Self {
@@ -100,6 +109,18 @@ impl From<db::ExportItem> for ExportItemRecord {
             subtitle: value.subtitle,
             keywords: value.keywords,
             note: value.note,
+            image_count: value.image_count,
+        }
+    }
+}
+
+impl From<db::DeletedItemSummary> for DeletedItemRecord {
+    fn from(value: db::DeletedItemSummary) -> Self {
+        Self {
+            archive_key: value.archive_key,
+            id: value.id,
+            title: value.title,
+            deleted_at_unix_seconds: value.deleted_at_unix_seconds,
             image_count: value.image_count,
         }
     }
@@ -286,6 +307,24 @@ pub fn delete_item(item_id: i64) -> Result<(), BackendError> {
 }
 
 #[uniffi::export]
+pub fn list_deleted_items(limit: Option<u32>) -> Result<Vec<DeletedItemRecord>, BackendError> {
+    let limit = limit.unwrap_or(50).max(1).min(256);
+    let items = db::list_deleted_items(i64::from(limit)).map_err(map_anyhow)?;
+    Ok(items.into_iter().map(DeletedItemRecord::from).collect())
+}
+
+#[uniffi::export]
+pub fn restore_deleted_item(archive_key: String) -> Result<i64, BackendError> {
+    let archive_key = archive_key.trim();
+    if archive_key.is_empty() {
+        return Err(BackendError::Validation(
+            "archive_key must not be empty".to_string(),
+        ));
+    }
+    db::restore_deleted_item(archive_key).map_err(map_anyhow)
+}
+
+#[uniffi::export]
 pub fn get_item_json_path(item_id: i64) -> Result<String, BackendError> {
     ensure_item_id(item_id)?;
     db::get_item_json_path(item_id).map_err(map_anyhow)
@@ -313,7 +352,7 @@ fn normalize_limit(limit: Option<u32>) -> Result<u32, BackendError> {
 
 fn map_anyhow(err: anyhow::Error) -> BackendError {
     let message = err.to_string();
-    if message.contains("item not found") {
+    if message.contains("item not found") || message.contains("deleted archive not found") {
         return BackendError::NotFound("requested item does not exist".to_string());
     }
 

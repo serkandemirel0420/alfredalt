@@ -37,6 +37,14 @@ enum RustBridgeClient {
         try deleteItem(itemId: itemId)
     }
 
+    static func listDeleted(limit: UInt32 = 50) throws -> [DeletedItemRecord] {
+        try listDeletedItems(limit: limit)
+    }
+
+    static func restoreDeleted(archiveKey: String) throws -> Int64 {
+        try restoreDeletedItem(archiveKey: archiveKey)
+    }
+
     static func getJsonPath(itemId: Int64) throws -> String {
         try getItemJsonPath(itemId: itemId)
     }

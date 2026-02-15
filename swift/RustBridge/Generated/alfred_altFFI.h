@@ -283,6 +283,11 @@ RustBuffer uniffi_alfred_alt_fn_func_get_item(int64_t item_id, RustCallStatus *_
 RustBuffer uniffi_alfred_alt_fn_func_get_item_json_path(int64_t item_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_LIST_DELETED_ITEMS
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_LIST_DELETED_ITEMS
+RustBuffer uniffi_alfred_alt_fn_func_list_deleted_items(RustBuffer limit, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_LOAD_HOTKEY
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_LOAD_HOTKEY
 RustBuffer uniffi_alfred_alt_fn_func_load_hotkey(RustCallStatus *_Nonnull out_status
@@ -298,6 +303,11 @@ RustBuffer uniffi_alfred_alt_fn_func_load_json_storage_path(RustCallStatus *_Non
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_RENAME_ITEM
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_RENAME_ITEM
 void uniffi_alfred_alt_fn_func_rename_item(int64_t item_id, RustBuffer title, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_RESTORE_DELETED_ITEM
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_RESTORE_DELETED_ITEM
+int64_t uniffi_alfred_alt_fn_func_restore_deleted_item(RustBuffer archive_key, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_FN_FUNC_SAVE_HOTKEY
@@ -636,6 +646,12 @@ uint16_t uniffi_alfred_alt_checksum_func_get_item_json_path(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LIST_DELETED_ITEMS
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LIST_DELETED_ITEMS
+uint16_t uniffi_alfred_alt_checksum_func_list_deleted_items(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LOAD_HOTKEY
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_LOAD_HOTKEY
 uint16_t uniffi_alfred_alt_checksum_func_load_hotkey(void
@@ -651,6 +667,12 @@ uint16_t uniffi_alfred_alt_checksum_func_load_json_storage_path(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_RENAME_ITEM
 #define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_RENAME_ITEM
 uint16_t uniffi_alfred_alt_checksum_func_rename_item(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_RESTORE_DELETED_ITEM
+#define UNIFFI_FFIDEF_UNIFFI_ALFRED_ALT_CHECKSUM_FUNC_RESTORE_DELETED_ITEM
+uint16_t uniffi_alfred_alt_checksum_func_restore_deleted_item(void
     
 );
 #endif

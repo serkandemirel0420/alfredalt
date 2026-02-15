@@ -1196,8 +1196,62 @@ struct SettingsWindowView: View {
             }
             .id(updateStatusViewID)
             
-            
             Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Deleted Items")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Open Deleted Folder") {
+                        viewModel.openDeletedItemsFolder()
+                    }
+                    .font(.system(size: 12))
+                    Button("Refresh") {
+                        viewModel.refreshDeletedItems()
+                    }
+                    .font(.system(size: 12))
+                }
+
+                if viewModel.isLoadingDeletedItems {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Loading deleted items...")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                } else if viewModel.deletedItems.isEmpty {
+                    Text("No deleted items.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(viewModel.deletedItems.prefix(8)), id: \.archiveKey) { item in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.title)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .lineLimit(1)
+                                Text("Deleted \(deletedItemDateString(item.deletedAtUnixSeconds)) • \(item.imageCount) image(s)")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Restore") {
+                                Task {
+                                    await viewModel.restoreDeletedItem(archiveKey: item.archiveKey)
+                                }
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                }
+            }
             
             // Font Sizes Section
             VStack(alignment: .leading, spacing: 12) {
@@ -1254,6 +1308,18 @@ struct SettingsWindowView: View {
             updateChecker.latestVersion ?? ""
         ].joined(separator: "|")
     }
+
+    private func deletedItemDateString(_ unixSeconds: Int64) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(unixSeconds))
+        return Self.deletedItemDateFormatter.string(from: date)
+    }
+
+    private static let deletedItemDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
     
     private var appearanceTab: some View {
         ScrollView {

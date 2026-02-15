@@ -30,6 +30,7 @@ const FUZZY_SCAN_MAX_ROWS: i64 = 2048;
 const INDEX_DIR_NAME: &str = "alfred_lucene_index";
 const DEFAULT_JSON_STORAGE_DIR_NAME: &str = "AlfredAlternativeData";
 const JSON_STORAGE_IMAGES_DIR_NAME: &str = "images";
+const JSON_STORAGE_DELETED_DIR_NAME: &str = "deleted";
 const LEGACY_INDEX_DIR_NAME: &str = "alfred_search_index";
 const LEGACY_DATA_FILE_NAME: &str = "alfred_store.json";
 const LEGACY_DATA_TMP_FILE_NAME: &str = "alfred_store.json.tmp";
@@ -51,6 +52,15 @@ pub struct ExportItem {
     pub image_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DeletedItemSummary {
+    pub archive_key: String,
+    pub id: i64,
+    pub title: String,
+    pub deleted_at_unix_seconds: i64,
+    pub image_count: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedImage {
     image_key: String,
@@ -67,7 +77,7 @@ struct PersistedItem {
     images: Vec<PersistedImage>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct JsonImageEntry {
     image_key: String,
     file_name: String,
@@ -80,6 +90,17 @@ struct JsonItemFile {
     subtitle: String,
     keywords: String,
     note: String,
+    images: Vec<JsonImageEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeletedJsonItemFile {
+    id: i64,
+    title: String,
+    subtitle: String,
+    keywords: String,
+    note: String,
+    deleted_at_unix_seconds: u64,
     images: Vec<JsonImageEntry>,
 }
 
@@ -181,6 +202,10 @@ fn is_item_json_file_name(name: &str) -> bool {
     name.starts_with("item-") && name.ends_with(".json")
 }
 
+fn deleted_item_dir_name(item_id: i64, deleted_at_unix_seconds: u64) -> String {
+    format!("item-{item_id}-deleted-{deleted_at_unix_seconds}")
+}
+
 fn image_file_name(image_key: &str) -> String {
     let mut encoded = String::with_capacity(image_key.len() + 4);
     for byte in image_key.bytes() {
@@ -206,7 +231,10 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<()> {
 
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let Some(parent) = path.parent() else {
-        return Err(anyhow!("cannot resolve parent directory for {}", path.display()));
+        return Err(anyhow!(
+            "cannot resolve parent directory for {}",
+            path.display()
+        ));
     };
 
     std::fs::create_dir_all(parent)
@@ -230,6 +258,182 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+fn archive_deleted_item(root: &Path, item: &PersistedItem) -> Result<()> {
+    let deleted_at_unix_seconds = unix_timestamp();
+    let deleted_root = root.join(JSON_STORAGE_DELETED_DIR_NAME);
+    let deleted_item_dir =
+        deleted_root.join(deleted_item_dir_name(item.id, deleted_at_unix_seconds));
+    let deleted_images_dir = deleted_item_dir.join(JSON_STORAGE_IMAGES_DIR_NAME);
+
+    std::fs::create_dir_all(&deleted_images_dir).with_context(|| {
+        format!(
+            "failed to create deleted item directory {}",
+            deleted_images_dir.display()
+        )
+    })?;
+
+    let mut image_entries = Vec::with_capacity(item.images.len());
+    for image in &item.images {
+        let file_name = image_file_name(&image.image_key);
+        let image_path = deleted_images_dir.join(&file_name);
+        write_bytes_atomic(&image_path, &image.bytes).with_context(|| {
+            format!(
+                "failed to write deleted item image {}",
+                image_path.display()
+            )
+        })?;
+
+        image_entries.push(JsonImageEntry {
+            image_key: image.image_key.clone(),
+            file_name,
+        });
+    }
+
+    let deleted_item_file = DeletedJsonItemFile {
+        id: item.id,
+        title: item.title.clone(),
+        subtitle: item.subtitle.clone(),
+        keywords: item.keywords.clone(),
+        note: item.note.clone(),
+        deleted_at_unix_seconds,
+        images: image_entries,
+    };
+
+    let deleted_item_json_path = deleted_item_dir.join(item_json_file_name(item.id));
+    write_json_atomic(&deleted_item_json_path, &deleted_item_file).with_context(|| {
+        format!(
+            "failed to write deleted item JSON file {}",
+            deleted_item_json_path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct DeletedArchive {
+    archive_key: String,
+    archive_dir: PathBuf,
+    payload: DeletedJsonItemFile,
+}
+
+fn read_deleted_archives(root: &Path) -> Result<Vec<DeletedArchive>> {
+    let deleted_root = root.join(JSON_STORAGE_DELETED_DIR_NAME);
+    if !deleted_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut archives = Vec::new();
+    for entry in std::fs::read_dir(&deleted_root)
+        .with_context(|| format!("failed to scan deleted root {}", deleted_root.display()))?
+    {
+        let entry = entry?;
+        let archive_dir = entry.path();
+        if !archive_dir.is_dir() {
+            continue;
+        }
+
+        let archive_key = entry.file_name().to_string_lossy().to_string();
+
+        let mut deleted_item_json_path: Option<PathBuf> = None;
+        for child in std::fs::read_dir(&archive_dir)
+            .with_context(|| format!("failed to scan deleted archive {}", archive_dir.display()))?
+        {
+            let child = child?;
+            let child_path = child.path();
+            if !child_path.is_file() {
+                continue;
+            }
+
+            let Some(file_name) = child_path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if is_item_json_file_name(file_name) {
+                deleted_item_json_path = Some(child_path);
+                break;
+            }
+        }
+
+        let Some(json_path) = deleted_item_json_path else {
+            continue;
+        };
+
+        let payload_bytes = std::fs::read(&json_path)
+            .with_context(|| format!("failed reading deleted item payload {}", json_path.display()))?;
+        let payload: DeletedJsonItemFile = serde_json::from_slice(&payload_bytes).with_context(|| {
+            format!(
+                "failed parsing deleted item payload JSON {}",
+                json_path.display()
+            )
+        })?;
+
+        archives.push(DeletedArchive {
+            archive_key,
+            archive_dir,
+            payload,
+        });
+    }
+
+    Ok(archives)
+}
+
+fn find_deleted_archive(root: &Path, archive_key: &str) -> Result<DeletedArchive> {
+    let archives = read_deleted_archives(root)?;
+    archives
+        .into_iter()
+        .find(|archive| archive.archive_key == archive_key)
+        .ok_or_else(|| anyhow!("deleted archive not found: {archive_key}"))
+}
+
+fn restore_deleted_archive(store: &mut Store, archive: &DeletedArchive) -> Result<i64> {
+    let deleted_images_dir = archive.archive_dir.join(JSON_STORAGE_IMAGES_DIR_NAME);
+    let mut restored_images = Vec::with_capacity(archive.payload.images.len());
+    for image in &archive.payload.images {
+        let image_path = deleted_images_dir.join(&image.file_name);
+        let bytes = std::fs::read(&image_path).with_context(|| {
+            format!("failed reading deleted image during restore {}", image_path.display())
+        })?;
+        restored_images.push(PersistedImage {
+            image_key: image.image_key.clone(),
+            bytes,
+        });
+    }
+
+    let requested_id = archive.payload.id.max(1);
+    let restored_id = if store.item_by_id(requested_id).is_none() {
+        requested_id
+    } else {
+        store.next_item_id()
+    };
+
+    if restored_id >= store.data.next_item_id {
+        store.data.next_item_id = restored_id.saturating_add(1);
+    }
+
+    store.data.items.insert(
+        restored_id,
+        PersistedItem {
+            id: restored_id,
+            title: archive.payload.title.clone(),
+            subtitle: archive.payload.subtitle.clone(),
+            keywords: archive.payload.keywords.clone(),
+            note: archive.payload.note.clone(),
+            images: restored_images,
+        },
+    );
+
+    store.flush_all()?;
+
+    std::fs::remove_dir_all(&archive.archive_dir).with_context(|| {
+        format!(
+            "failed removing deleted archive after restore {}",
+            archive.archive_dir.display()
+        )
+    })?;
+
+    Ok(restored_id)
 }
 
 fn get_store() -> Result<&'static Mutex<Store>> {
@@ -325,9 +529,8 @@ impl Store {
     fn sync_json_storage(&self) -> Result<()> {
         let root = self.json_storage_root();
         let images_dir = root.join(JSON_STORAGE_IMAGES_DIR_NAME);
-        std::fs::create_dir_all(&root).with_context(|| {
-            format!("failed to create JSON storage root {}", root.display())
-        })?;
+        std::fs::create_dir_all(&root)
+            .with_context(|| format!("failed to create JSON storage root {}", root.display()))?;
         std::fs::create_dir_all(&images_dir).with_context(|| {
             format!(
                 "failed to create JSON image storage directory {}",
@@ -381,8 +584,8 @@ impl Store {
         root: &Path,
         expected_file_names: &HashSet<String>,
     ) -> Result<()> {
-        for entry in std::fs::read_dir(root)
-            .with_context(|| format!("failed to scan {}", root.display()))?
+        for entry in
+            std::fs::read_dir(root).with_context(|| format!("failed to scan {}", root.display()))?
         {
             let entry = entry?;
             let path = entry.path();
@@ -541,7 +744,10 @@ impl Store {
             let doc: TantivyDocument = searcher
                 .doc(addr)
                 .context("failed to load Lucene document")?;
-            let Some(id) = doc.get_first(self.fields.id).and_then(|value| value.as_i64()) else {
+            let Some(id) = doc
+                .get_first(self.fields.id)
+                .and_then(|value| value.as_i64())
+            else {
                 continue;
             };
 
@@ -1208,9 +1414,17 @@ pub fn rename_item(id: i64, title: &str) -> Result<()> {
 
 pub fn delete_item(id: i64) -> Result<()> {
     run_with_store(|store| {
+        let item = store
+            .item_by_id(id)
+            .cloned()
+            .ok_or_else(|| anyhow!("item not found: {id}"))?;
+
+        archive_deleted_item(&store.json_storage_root(), &item)?;
+
         if store.data.items.remove(&id).is_none() {
             return Err(anyhow!("item not found: {id}"));
         }
+
         store.flush_all()
     })
 }
@@ -1223,6 +1437,45 @@ pub fn get_item_json_path(id: i64) -> Result<String> {
         let root = store.json_storage_root();
         let file_name = item_json_file_name(id);
         Ok(root.join(file_name).to_string_lossy().to_string())
+    })
+}
+
+pub fn list_deleted_items(limit: i64) -> Result<Vec<DeletedItemSummary>> {
+    run_with_store(|store| {
+        let limit = limit.max(0) as usize;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let root = store.json_storage_root();
+        let mut rows: Vec<DeletedItemSummary> = read_deleted_archives(&root)?
+            .into_iter()
+            .map(|archive| DeletedItemSummary {
+                archive_key: archive.archive_key,
+                id: archive.payload.id,
+                title: archive.payload.title,
+                deleted_at_unix_seconds: i64::try_from(archive.payload.deleted_at_unix_seconds)
+                    .unwrap_or(i64::MAX),
+                image_count: archive.payload.images.len() as i64,
+            })
+            .collect();
+
+        rows.sort_by(|left, right| {
+            right
+                .deleted_at_unix_seconds
+                .cmp(&left.deleted_at_unix_seconds)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    })
+}
+
+pub fn restore_deleted_item(archive_key: &str) -> Result<i64> {
+    run_with_store(|store| {
+        let root = store.json_storage_root();
+        let archive = find_deleted_archive(&root, archive_key)?;
+        restore_deleted_archive(store, &archive)
     })
 }
 

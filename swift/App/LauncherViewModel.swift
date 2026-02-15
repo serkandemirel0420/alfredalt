@@ -14,6 +14,7 @@ private let editorMaxFontSize: CGFloat = 40
 private let editorFontSizeStep: CGFloat = 1
 private let defaultSearchLimit: UInt32 = 8
 private let listAllSearchLimit: UInt32 = 50
+private let deletedItemsLimit: UInt32 = 50
 
 @MainActor
 final class LauncherViewModel: ObservableObject {
@@ -49,6 +50,8 @@ final class LauncherViewModel: ObservableObject {
     @Published var settingsStorageDirectoryPath: String = ""
     @Published var settingsErrorMessage: String?
     @Published var settingsSuccessMessage: String?
+    @Published private(set) var deletedItems: [DeletedItemRecord] = []
+    @Published private(set) var isLoadingDeletedItems: Bool = false
 
     private var queuedSearchQuery: String?
     private var isSearchWorkerRunning = false
@@ -113,6 +116,7 @@ final class LauncherViewModel: ObservableObject {
         settingsSuccessMessage = nil
         loadSettingsStorageDirectoryPath()
         reloadSettingsFromDisk()
+        refreshDeletedItems()
     }
 
     func settingsDidOpen() {
@@ -157,11 +161,63 @@ final class LauncherViewModel: ObservableObject {
             settingsStorageDirectoryPath = try RustBridgeClient.loadJsonStorageDirectoryPath()
             settingsErrorMessage = nil
             settingsSuccessMessage = "Saved."
+            refreshDeletedItems()
             return true
         } catch {
             settingsErrorMessage = error.localizedDescription
             settingsSuccessMessage = nil
             return false
+        }
+    }
+
+    func refreshDeletedItems() {
+        guard !isLoadingDeletedItems else {
+            return
+        }
+
+        isLoadingDeletedItems = true
+        Task { [weak self] in
+            guard let self else {
+                return
+            }
+
+            do {
+                let rows = try await Task.detached(priority: .userInitiated) {
+                    try RustBridgeClient.listDeleted(limit: deletedItemsLimit)
+                }.value
+                self.deletedItems = rows
+            } catch {
+                self.settingsErrorMessage = error.localizedDescription
+            }
+
+            self.isLoadingDeletedItems = false
+        }
+    }
+
+    func restoreDeletedItem(archiveKey: String) async {
+        do {
+            _ = try await Task.detached(priority: .userInitiated) {
+                try RustBridgeClient.restoreDeleted(archiveKey: archiveKey)
+            }.value
+
+            settingsErrorMessage = nil
+            settingsSuccessMessage = "Restored."
+            refreshDeletedItems()
+            refreshSearchForCurrentQuery()
+        } catch {
+            settingsErrorMessage = error.localizedDescription
+            settingsSuccessMessage = nil
+        }
+    }
+
+    func openDeletedItemsFolder() {
+        do {
+            let folderURL = try deletedItemsFolderURL()
+            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(folderURL)
+            settingsErrorMessage = nil
+        } catch {
+            settingsErrorMessage = error.localizedDescription
         }
     }
 
@@ -514,6 +570,12 @@ final class LauncherViewModel: ObservableObject {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(title, forType: .string)
+    }
+
+    private func deletedItemsFolderURL() throws -> URL {
+        let root = try RustBridgeClient.loadJsonStorageDirectoryPath()
+        return URL(fileURLWithPath: root, isDirectory: true)
+            .appendingPathComponent("deleted", isDirectory: true)
     }
 
     func persistEditorState() async {
