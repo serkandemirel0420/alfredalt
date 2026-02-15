@@ -227,9 +227,37 @@ final class LauncherViewModel: ObservableObject {
         }
 
         launcherWindow.orderOut(nil)
-        if !isEditorPresented {
+        if !isEditorPresented && !isSettingsPresented {
             NSApp.hide(nil)
         }
+    }
+
+    func revealSettingsIfNeeded() {
+        guard isSettingsPresented, let settingsWindow else {
+            return
+        }
+
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if settingsWindow.isMiniaturized {
+            settingsWindow.deminiaturize(nil)
+        }
+        settingsWindow.makeKeyAndOrderFront(nil)
+        settingsWindow.orderFrontRegardless()
+    }
+
+    func revealEditorIfNeeded() {
+        guard isEditorPresented, let editorWindow else {
+            return
+        }
+
+        NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if editorWindow.isMiniaturized {
+            editorWindow.deminiaturize(nil)
+        }
+        editorWindow.makeKeyAndOrderFront(nil)
+        editorWindow.orderFrontRegardless()
     }
 
     func revealLauncherIfNeeded() {
@@ -248,7 +276,17 @@ final class LauncherViewModel: ObservableObject {
     }
 
     func toggleLauncherVisibilityFromHotKey() {
-        guard !isEditorPresented, !isSettingsPresented, let launcherWindow else {
+        if isSettingsPresented {
+            revealSettingsIfNeeded()
+            return
+        }
+
+        if isEditorPresented {
+            revealEditorIfNeeded()
+            return
+        }
+
+        guard let launcherWindow else {
             return
         }
 

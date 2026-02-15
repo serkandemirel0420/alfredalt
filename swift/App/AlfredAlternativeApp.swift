@@ -16,11 +16,28 @@ final class AlfredAlternativeAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if viewModel?.isSettingsPresented == true {
+            viewModel?.revealSettingsIfNeeded()
+            return true
+        }
+        if viewModel?.isEditorPresented == true {
+            viewModel?.revealEditorIfNeeded()
+            return true
+        }
         viewModel?.revealLauncherIfNeeded()
         return true
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        if viewModel?.isSettingsPresented == true {
+            viewModel?.revealSettingsIfNeeded()
+            return
+        }
+        if viewModel?.isEditorPresented == true {
+            viewModel?.revealEditorIfNeeded()
+            return
+        }
+
         if NSApp.windows.contains(where: { $0.title == "Settings" && $0.isVisible }) {
             return
         }
