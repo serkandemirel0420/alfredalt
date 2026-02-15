@@ -516,14 +516,19 @@ struct ContentView: View {
             }
             switch event.keyCode {
             case 126: // up
-                if actionMenuSelectedIndex > 0 {
-                    actionMenuSelectedIndex -= 1
+                let actions = filteredActions
+                if !actions.isEmpty {
+                    if actionMenuSelectedIndex <= 0 {
+                        actionMenuSelectedIndex = actions.count - 1
+                    } else {
+                        actionMenuSelectedIndex -= 1
+                    }
                 }
                 return true
             case 125: // down
                 let actions = filteredActions
-                if actionMenuSelectedIndex + 1 < actions.count {
-                    actionMenuSelectedIndex += 1
+                if !actions.isEmpty {
+                    actionMenuSelectedIndex = (actionMenuSelectedIndex + 1) % actions.count
                 }
                 return true
             case 36, 76: // return / enter
