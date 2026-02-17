@@ -42,6 +42,7 @@ private var minimapViewportBorderColor: NSColor {
 private protocol EditorCommandDelegate: AnyObject {
     func increaseDocumentFontSize()
     func decreaseDocumentFontSize()
+    func documentFontSize() -> CGFloat
     func currentSearchQuery() -> String
     func areSearchHighlightsEnabled() -> Bool
 }
@@ -148,6 +149,10 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
             _ = adjustFontSize(delta: -1)
         }
 
+        @objc func makeTextStandardSize(_ sender: Any?) {
+            _ = resetTextStyleForSelection()
+        }
+
         override func changeFont(_ sender: Any?) {
             guard let manager = sender as? NSFontManager else {
                 return
@@ -163,6 +168,10 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
             if modifiers == [.command],
                event.charactersIgnoringModifiers?.lowercased() == "b" {
                 return toggleBoldForSelection()
+            }
+
+            if modifiers == [.command], isResetStyleShortcut(event) {
+                return resetTextStyleForSelection()
             }
 
             if modifiers == [.command] || modifiers == [.command, .shift] {
@@ -244,6 +253,17 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
             return chars == "-"
         }
 
+        private func isResetStyleShortcut(_ event: NSEvent) -> Bool {
+            if event.keyCode == 29 || event.keyCode == 82 {
+                return true
+            }
+
+            guard let chars = event.charactersIgnoringModifiers else {
+                return false
+            }
+            return chars == "0"
+        }
+
         private func toggleBoldForSelection() -> Bool {
             let range = selectedRange()
             guard let storage = textStorage else {
@@ -308,6 +328,21 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
                 return NSFont(descriptor: currentFont.fontDescriptor, size: nextSize)
                     ?? NSFont.systemFont(ofSize: nextSize, weight: fontIsBold(currentFont) ? .bold : .regular)
             }
+            return true
+        }
+
+        private func resetTextStyleForSelection() -> Bool {
+            let baseFontSize = commandDelegate?.documentFontSize() ?? editorDefaultFontSize
+            let defaultFont = editorFont(for: baseFontSize)
+            let range = selectedRange()
+
+            if range.length == 0 {
+                typingAttributes[.font] = defaultFont
+                typingAttributes[.foregroundColor] = editorTextColor
+                return true
+            }
+
+            applyFontTransform { _ in defaultFont }
             return true
         }
 
@@ -1494,6 +1529,10 @@ struct InlineImageTextEditor: NSViewRepresentable {
 
         func decreaseDocumentFontSize() {
             parent.onDecreaseDocumentFontSize?()
+        }
+
+        func documentFontSize() -> CGFloat {
+            parent.fontSize
         }
         
         func currentSearchQuery() -> String {
