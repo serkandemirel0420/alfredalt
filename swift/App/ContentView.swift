@@ -1986,6 +1986,7 @@ private struct EditorDocumentFontSizeSettings: Codable {
 private struct EditorSheet: View {
     @ObservedObject var viewModel: LauncherViewModel
     @EnvironmentObject var themeManager: ThemeManager
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
     @FocusState private var titleFieldFocused: Bool
     @State private var editorCursorCharIndex: Int?
@@ -2184,6 +2185,8 @@ private struct EditorSheet: View {
             if isDeletedPreviewMode {
                 viewModel.clearDeletedItemPreview()
                 dismissWindow(id: "editor")
+                viewModel.prepareSettings()
+                openWindow(id: "settings")
                 return
             }
 
