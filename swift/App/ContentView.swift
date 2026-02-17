@@ -903,14 +903,14 @@ private struct TabButton: View {
                 Text(tab.rawValue)
                     .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
             }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(isSelected ? Color(nsColor: .selectedControlColor) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(isSelected ? Color(nsColor: .selectedControlTextColor) : Color.primary)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(isSelected ? Color(nsColor: .selectedControlColor) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .contentShape(Rectangle())
     }
 }
 
