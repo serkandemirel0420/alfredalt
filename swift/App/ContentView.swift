@@ -506,6 +506,26 @@ struct ContentView: View {
         return isSelected ? themeManager.colors.selectedItemSubtitleText : themeManager.colors.itemSubtitleText
     }
 
+    private func moveResultSelectionUpCyclic() {
+        let count = viewModel.results.count
+        guard count > 0 else {
+            return
+        }
+
+        let normalizedIndex = min(max(selectedIndex, 0), count - 1)
+        selectedIndex = normalizedIndex == 0 ? count - 1 : normalizedIndex - 1
+    }
+
+    private func moveResultSelectionDownCyclic() {
+        let count = viewModel.results.count
+        guard count > 0 else {
+            return
+        }
+
+        let normalizedIndex = min(max(selectedIndex, 0), count - 1)
+        selectedIndex = (normalizedIndex + 1) % count
+    }
+
     private func handleLauncherKeyEvent(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(keyHandlingModifierMask)
 
@@ -563,15 +583,11 @@ struct ContentView: View {
 
         switch event.keyCode {
         case 126: // up
-            if selectedIndex > 0 {
-                selectedIndex -= 1
-            }
+            moveResultSelectionUpCyclic()
             searchFieldFocused = true
             return true
         case 125: // down
-            if selectedIndex + 1 < viewModel.results.count {
-                selectedIndex += 1
-            }
+            moveResultSelectionDownCyclic()
             searchFieldFocused = true
             return true
         case 36, 76: // return / enter
