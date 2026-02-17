@@ -182,6 +182,17 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
                     return adjustFontSize(delta: -1)
                 }
             }
+
+            if modifiers == [.command, .option] {
+                if event.keyCode == 126 { // Up arrow
+                    _ = navigateToLineWithMatchingIndent(direction: .up)
+                    return true
+                }
+                if event.keyCode == 125 { // Down arrow
+                    _ = navigateToLineWithMatchingIndent(direction: .down)
+                    return true
+                }
+            }
             
             // Option+Up/Down to navigate to previous/next search match
             if modifiers == [.option] {
@@ -963,6 +974,11 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
         case previous
         case next
     }
+
+    private enum IndentNavigationDirection {
+        case up
+        case down
+    }
     
     /// Navigate to previous or next search match
     private func navigateToSearchMatch(direction: SearchDirection) -> Bool {
@@ -1023,6 +1039,96 @@ private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key:
         }
         
         return true
+    }
+
+    private func navigateToLineWithMatchingIndent(direction: IndentNavigationDirection) -> Bool {
+        let fullText = string as NSString
+        guard fullText.length > 0 else {
+            return false
+        }
+
+        let selection = selectedRange()
+        let anchorLocation = currentLineAnchorLocation(selectionLocation: selection.location, textLength: fullText.length)
+        let currentLineRange = fullText.lineRange(for: NSRange(location: anchorLocation, length: 0))
+        let targetIndent = leadingTabCount(in: currentLineRange, text: fullText)
+        let currentColumn = max(0, selection.location - currentLineRange.location)
+
+        var scanLocation = currentLineRange.location
+
+        switch direction {
+        case .down:
+            scanLocation = NSMaxRange(currentLineRange)
+            while scanLocation < fullText.length {
+                let candidateLineRange = fullText.lineRange(for: NSRange(location: scanLocation, length: 0))
+                if leadingTabCount(in: candidateLineRange, text: fullText) == targetIndent,
+                   !isBlankLine(candidateLineRange, text: fullText) {
+                    placeCursor(in: candidateLineRange, column: currentColumn, text: fullText)
+                    return true
+                }
+
+                let nextLocation = NSMaxRange(candidateLineRange)
+                if nextLocation <= scanLocation {
+                    break
+                }
+                scanLocation = nextLocation
+            }
+        case .up:
+            while scanLocation > 0 {
+                let previousLocation = scanLocation - 1
+                let candidateLineRange = fullText.lineRange(for: NSRange(location: previousLocation, length: 0))
+                if leadingTabCount(in: candidateLineRange, text: fullText) == targetIndent,
+                   !isBlankLine(candidateLineRange, text: fullText) {
+                    placeCursor(in: candidateLineRange, column: currentColumn, text: fullText)
+                    return true
+                }
+
+                if candidateLineRange.location >= scanLocation {
+                    break
+                }
+                scanLocation = candidateLineRange.location
+            }
+        }
+
+        return false
+    }
+
+    private func currentLineAnchorLocation(selectionLocation: Int, textLength: Int) -> Int {
+        if textLength <= 0 {
+            return 0
+        }
+        return min(max(selectionLocation, 0), textLength - 1)
+    }
+
+    private func leadingTabCount(in lineRange: NSRange, text: NSString) -> Int {
+        let line = text.substring(with: lineRange)
+        var count = 0
+
+        for scalar in line.unicodeScalars {
+            if scalar == "\t" {
+                count += 1
+                continue
+            }
+            break
+        }
+
+        return count
+    }
+
+    private func isBlankLine(_ lineRange: NSRange, text: NSString) -> Bool {
+        let line = text.substring(with: lineRange)
+        return line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func placeCursor(in lineRange: NSRange, column: Int, text: NSString) {
+        var lineStart = 0
+        var contentEnd = 0
+        text.getLineStart(&lineStart, end: nil, contentsEnd: &contentEnd, for: lineRange)
+
+        let clampedColumn = max(0, min(column, max(contentEnd - lineStart, 0)))
+        let location = lineStart + clampedColumn
+        let caretRange = NSRange(location: location, length: 0)
+        setSelectedRange(caretRange)
+        scrollRangeToVisible(caretRange)
     }
     
     /// Briefly highlight a match to show where we navigated to
