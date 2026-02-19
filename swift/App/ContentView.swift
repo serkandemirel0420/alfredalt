@@ -989,6 +989,9 @@ struct SettingsWindowView: View {
     @StateObject private var hotKeyManager = HotKeyManager.shared
     @FocusState private var pathFieldFocused: Bool
     @State private var selectedTab: SettingsTab = .general
+    @State private var isRecordingHotKey: Bool = false
+    @State private var hotKeyStatusMessage: String?
+    @State private var hotKeyStatusIsError: Bool = false
     @Environment(\.openWindow) private var openWindow
     
     enum SettingsTab: String, CaseIterable, Identifiable {
@@ -1063,6 +1066,9 @@ struct SettingsWindowView: View {
             if newTab == .general {
                 updateChecker.checkForUpdate()
             }
+            if newTab != .hotkeys {
+                isRecordingHotKey = false
+            }
         }
         .onChange(of: viewModel.settingsStorageDirectoryPath) { _, _ in
             if viewModel.settingsSuccessMessage != nil {
@@ -1071,9 +1077,16 @@ struct SettingsWindowView: View {
         }
         // Handle ESC key to close settings window
         .background(
-            SettingsKeyEventMonitor {
-                dismissWindow(id: "settings")
-            }
+            SettingsKeyEventMonitor(
+                onEscape: {
+                    if isRecordingHotKey {
+                        isRecordingHotKey = false
+                    } else {
+                        dismissWindow(id: "settings")
+                    }
+                },
+                onKeyDown: handleHotKeyCaptureKeyDown
+            )
         )
         .alert("Restart to Update", isPresented: $autoUpdater.showRestartAlert) {
             Button("Restart Now") {
@@ -1626,88 +1639,97 @@ struct SettingsWindowView: View {
     private var hotkeysTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                // Launcher Hotkey Section
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Launcher Hotkey")
                         .font(.system(size: 14, weight: .medium))
-                    
-                    Text("Choose how to show or hide the launcher.")
+
+                    Text("Click the field, press your shortcut, and it saves immediately.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                    
-                    VStack(spacing: 12) {
-                        // Double Option
-                        HotkeyOptionRow(
-                            title: "Double-Tap Option",
-                            subtitle: "Press the Option (⌥) key twice quickly",
-                            isSelected: hotKeyManager.currentHotKey == .doubleOption,
-                            icon: "option"
-                        ) {
-                            hotKeyManager.setHotKey(.doubleOption)
+
+                    Button {
+                        isRecordingHotKey = true
+                        hotKeyStatusMessage = nil
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: isRecordingHotKey ? "record.circle.fill" : "keyboard")
+                                .foregroundStyle(isRecordingHotKey ? themeManager.colors.accentColor : .secondary)
+                                .font(.system(size: 13))
+
+                            Text(isRecordingHotKey ? "Press shortcut now..." : hotKeyManager.currentShortcutDescription)
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundStyle(.primary)
+
+                            Spacer()
+
+                            Text(isRecordingHotKey ? "Recording" : "Edit")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(isRecordingHotKey ? themeManager.colors.accentColor : .secondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                        .fill(
+                                            isRecordingHotKey
+                                                ? themeManager.colors.accentColor.opacity(0.12)
+                                                : Color(nsColor: .controlBackgroundColor)
+                                        )
+                                )
                         }
-                        
-                        // Command + Space
-                        HotkeyOptionRow(
-                            title: "Command + Space",
-                            subtitle: "Classic Spotlight-style shortcut",
-                            isSelected: hotKeyManager.currentHotKey == .commandSpace,
-                            icon: "command"
-                        ) {
-                            hotKeyManager.setHotKey(.commandSpace)
-                        }
-                        
-                        // Option + Space
-                        HotkeyOptionRow(
-                            title: "Option + Space",
-                            subtitle: "Alternative modifier shortcut",
-                            isSelected: hotKeyManager.currentHotKey == .optionSpace,
-                            icon: "option2"
-                        ) {
-                            hotKeyManager.setHotKey(.optionSpace)
-                        }
-                        
-                        // Control + Space
-                        HotkeyOptionRow(
-                            title: "Control + Space",
-                            subtitle: "Ctrl+Space combination",
-                            isSelected: hotKeyManager.currentHotKey == .controlSpace,
-                            icon: "control"
-                        ) {
-                            hotKeyManager.setHotKey(.controlSpace)
-                        }
-                        
-                        // Shift + Space
-                        HotkeyOptionRow(
-                            title: "Shift + Space",
-                            subtitle: "Shift+Space combination",
-                            isSelected: hotKeyManager.currentHotKey == .shiftSpace,
-                            icon: "shift"
-                        ) {
-                            hotKeyManager.setHotKey(.shiftSpace)
-                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(
+                                    isRecordingHotKey
+                                        ? themeManager.colors.accentColor.opacity(0.45)
+                                        : Color.secondary.opacity(0.2),
+                                    lineWidth: 1
+                                )
+                        )
                     }
+                    .buttonStyle(.plain)
+
+                    if let hotKeyStatusMessage {
+                        Text(hotKeyStatusMessage)
+                            .font(.system(size: 12))
+                            .foregroundStyle(hotKeyStatusIsError ? themeManager.colors.errorColor : themeManager.colors.successColor)
+                    }
+
+                    Text("Current: \(hotKeyManager.currentShortcutDescription)")
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
                 }
-                
+
                 Divider()
                     .padding(.vertical, 8)
-                
-                // Tips Section
+
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Tips")
                         .font(.system(size: 14, weight: .medium))
-                    
+
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 8) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundStyle(themeManager.colors.accentColor)
-                            Text("Double-tap hotkeys may occasionally conflict with system shortcuts")
+                            Text("If a shortcut conflicts, the app keeps your previous one and shows an error")
                                 .font(.system(size: 12))
                         }
-                        
+
                         HStack(spacing: 8) {
                             Image(systemName: "info.circle.fill")
                                 .foregroundStyle(themeManager.colors.accentColor)
-                            Text("Changes take effect immediately")
+                            Text("Use at least one modifier key (⌘, ⌥, ⌃, or ⇧)")
+                                .font(.system(size: 12))
+                        }
+
+                        HStack(spacing: 8) {
+                            Image(systemName: "escape")
+                                .foregroundStyle(themeManager.colors.accentColor)
+                            Text("Press Escape while recording to cancel")
                                 .font(.system(size: 12))
                         }
                     }
@@ -1718,69 +1740,33 @@ struct SettingsWindowView: View {
             .padding(.bottom, 10)
         }
     }
-    
-    private struct HotkeyOptionRow: View {
-        let title: String
-        let subtitle: String
-        let isSelected: Bool
-        let icon: String
-        let action: () -> Void
-        @EnvironmentObject var themeManager: ThemeManager
-        
-        var iconText: String {
-            switch icon {
-            case "option": return "⌥"
-            case "option2": return "⌥"
-            case "command": return "⌘"
-            case "control": return "⌃"
-            case "shift": return "⇧"
-            default: return "⌘"
-            }
+
+    private func handleHotKeyCaptureKeyDown(_ event: NSEvent) -> Bool {
+        guard isRecordingHotKey else {
+            return false
         }
-        
-        var body: some View {
-            Button(action: action) {
-                HStack(spacing: 12) {
-                    // Icon
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(isSelected ? themeManager.colors.accentColor.opacity(0.15) : Color(nsColor: .controlBackgroundColor))
-                            .frame(width: 44, height: 44)
-                        
-                        Text(iconText)
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(isSelected ? themeManager.colors.accentColor : .primary)
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(title)
-                            .font(.system(size: 14, weight: isSelected ? .semibold : .medium))
-                            .foregroundStyle(isSelected ? themeManager.colors.accentColor : .primary)
-                        
-                        Text(subtitle)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                    
-                    Spacer()
-                    
-                    if isSelected {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(themeManager.colors.accentColor)
-                            .font(.system(size: 20))
-                    }
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(isSelected ? themeManager.colors.accentColor.opacity(0.08) : Color(nsColor: .controlBackgroundColor))
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(isSelected ? themeManager.colors.accentColor.opacity(0.3) : Color.clear, lineWidth: 1)
-                )
-            }
-            .buttonStyle(.plain)
+
+        if event.keyCode == 53 {
+            isRecordingHotKey = false
+            return true
         }
+
+        guard let shortcut = hotKeyManager.shortcut(from: event) else {
+            hotKeyStatusIsError = true
+            hotKeyStatusMessage = "Shortcut must include a modifier and a non-modifier key."
+            return true
+        }
+
+        switch hotKeyManager.applyShortcut(shortcut) {
+        case .success:
+            hotKeyStatusIsError = false
+            hotKeyStatusMessage = "Saved: \(hotKeyManager.currentShortcutDescription)"
+        case .failure(let message):
+            hotKeyStatusIsError = true
+            hotKeyStatusMessage = message
+        }
+        isRecordingHotKey = false
+        return true
     }
     
     private func openStorageFolder() {
@@ -1824,9 +1810,11 @@ struct SettingsWindowView: View {
 
 private struct SettingsKeyEventMonitor: NSViewRepresentable {
     let onEscape: () -> Void
+    let onKeyDown: ((NSEvent) -> Bool)?
     
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
+        context.coordinator.onKeyDown = onKeyDown
         
         // Add local monitor for key events - only for our window
         context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak coordinator = context.coordinator] event in
@@ -1834,6 +1822,10 @@ private struct SettingsKeyEventMonitor: NSViewRepresentable {
             guard let monitoredWindow = coordinator.window else { return event }
             // Only handle events for our window
             guard event.window === monitoredWindow else { return event }
+
+            if let onKeyDown = coordinator.onKeyDown, onKeyDown(event) {
+                return nil
+            }
             
             if event.keyCode == 53 { // ESC key
                 coordinator.onEscape?()
@@ -1846,6 +1838,7 @@ private struct SettingsKeyEventMonitor: NSViewRepresentable {
         DispatchQueue.main.async {
             context.coordinator.window = view.window
             context.coordinator.onEscape = onEscape
+            context.coordinator.onKeyDown = onKeyDown
         }
         
         return view
@@ -1854,6 +1847,7 @@ private struct SettingsKeyEventMonitor: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.window = nsView.window
         context.coordinator.onEscape = onEscape
+        context.coordinator.onKeyDown = onKeyDown
     }
     
     func makeCoordinator() -> Coordinator {
@@ -1862,6 +1856,7 @@ private struct SettingsKeyEventMonitor: NSViewRepresentable {
     
     static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
         coordinator.onEscape = nil
+        coordinator.onKeyDown = nil
         coordinator.window = nil
         if let monitor = coordinator.monitor {
             NSEvent.removeMonitor(monitor)
@@ -1873,6 +1868,7 @@ private struct SettingsKeyEventMonitor: NSViewRepresentable {
         var monitor: Any?
         weak var window: NSWindow?
         var onEscape: (() -> Void)?
+        var onKeyDown: ((NSEvent) -> Bool)?
     }
 }
 

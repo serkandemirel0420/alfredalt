@@ -2,91 +2,63 @@ import Carbon
 import Cocoa
 import SwiftUI
 
-enum HotKeyType: String, CaseIterable, Identifiable {
-    case doubleOption = "doubleOption"
-    case commandSpace = "commandSpace"
-    case optionSpace = "optionSpace"
-    case controlSpace = "controlSpace"
-    case shiftSpace = "shiftSpace"
-    
-    var id: String { rawValue }
-    
-    var displayName: String {
-        switch self {
-        case .doubleOption: return "Double Option (⌥⌥)"
-        case .commandSpace: return "Command+Space (⌘␣)"
-        case .optionSpace: return "Option+Space (⌥␣)"
-        case .controlSpace: return "Control+Space (⌃␣)"
-        case .shiftSpace: return "Shift+Space (⇧␣)"
-        }
-    }
-    
-    var shortcutDescription: String {
-        switch self {
-        case .doubleOption: return "⌥ ⌥"
-        case .commandSpace: return "⌘ ␣"
-        case .optionSpace: return "⌥ ␣"
-        case .controlSpace: return "⌃ ␣"
-        case .shiftSpace: return "⇧ ␣"
-        }
-    }
+struct HotKeyShortcut: Codable, Equatable {
+    let keyCode: UInt32
+    let carbonModifiers: UInt32
+}
+
+enum HotKeyApplyResult {
+    case success
+    case failure(String)
 }
 
 @MainActor
 final class HotKeyManager: ObservableObject {
     static let shared = HotKeyManager()
+
     private static let settingsFileName = "hotkey-settings.json"
     private static let legacyHotKeyTypeKey = "hotKeyType"
-    static let doubleTapInterval: TimeInterval = 0.3
+    private static let hotKeyExistsStatus: OSStatus = -9878
+    private static let hotKeyInvalidStatus: OSStatus = -9879
+    private static let supportedModifierMask = UInt32(cmdKey | optionKey | controlKey | shiftKey)
 
     private struct PersistedHotKeySettings: Codable {
+        let keyCode: UInt32
+        let carbonModifiers: UInt32
+    }
+
+    private struct LegacyPersistedHotKeySettings: Codable {
         let hotKeyType: String
     }
-    
-    @Published var currentHotKey: HotKeyType {
-        didSet {
-            if currentHotKey != oldValue {
-                if !isApplyingPersistedState {
-                    saveHotKeyPreference()
-                }
-                _ = register()
-            }
-        }
-    }
-    
+
+    @Published private(set) var currentShortcut: HotKeyShortcut
+
     private var handler: () -> Void = {}
     private var eventHandlerRef: EventHandlerRef?
     private var hotKeyRef: EventHotKeyRef?
-    
-    // Double-tap detection state
-    private var lastOptionTapTime: Date?
-    private var wasOptionPressed = false
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var isApplyingPersistedState = false
-    
+
     private init() {
-        currentHotKey = Self.loadPersistedHotKeyType() ?? .doubleOption
+        currentShortcut = Self.loadPersistedShortcut() ?? Self.defaultShortcut
     }
-    
+
+    var currentShortcutDescription: String {
+        Self.shortcutDescription(currentShortcut)
+    }
+
     func setHandler(_ handler: @escaping () -> Void) {
         self.handler = handler
     }
-    
+
+    @discardableResult
     func register() -> Bool {
-        unregister()
-        
-        switch currentHotKey {
-        case .doubleOption:
-            return registerDoubleOptionTap()
-        case .commandSpace, .optionSpace, .controlSpace, .shiftSpace:
-            return registerModifierSpace()
+        let status = register(shortcut: currentShortcut)
+        if status != noErr {
+            NSLog("HotKeyManager: Failed to register persisted hotkey, status: \(status)")
         }
+        return status == noErr
     }
-    
+
     func unregister() {
-        stopDoubleOptionMonitoring()
-        
         if let hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
             self.hotKeyRef = nil
@@ -97,97 +69,63 @@ final class HotKeyManager: ObservableObject {
             self.eventHandlerRef = nil
         }
     }
-    
-    // MARK: - Double Option Tap
-    
-    private func registerDoubleOptionTap() -> Bool {
-        // Request accessibility permission if needed
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true]
-        let accessibilityEnabled = AXIsProcessTrustedWithOptions(options as CFDictionary)
-        
-        NSLog("HotKeyManager: Accessibility enabled: \(accessibilityEnabled)")
-        
-        // Create event tap for flags changed (modifier key state changes)
-        let eventMask = CGEventMask(1 << CGEventType.flagsChanged.rawValue)
-        
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .listenOnly,  // Don't consume events, just listen
-            eventsOfInterest: eventMask,
-            callback: { proxy, type, event, refcon in
-                HotKeyManager.handleCGEvent(proxy: proxy, type: type, event: event, refcon: refcon)
-            },
-            userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            NSLog("HotKeyManager: Failed to create event tap")
-            return false
+
+    func shortcut(from event: NSEvent) -> HotKeyShortcut? {
+        let modifiers = Self.carbonModifiers(from: event.modifierFlags)
+        let candidate = HotKeyShortcut(
+            keyCode: UInt32(event.keyCode),
+            carbonModifiers: modifiers
+        )
+        guard Self.validationError(for: candidate) == nil else {
+            return nil
         }
-        
-        self.eventTap = tap
-        
-        let runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        self.runLoopSource = runLoopSource
-        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
-        
-        NSLog("HotKeyManager: Double Option tap registered")
-        return true
+        return Self.normalize(candidate)
     }
-    
-    private func stopDoubleOptionMonitoring() {
-        if let runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-            self.runLoopSource = nil
+
+    func applyShortcut(_ candidate: HotKeyShortcut) -> HotKeyApplyResult {
+        let normalized = Self.normalize(candidate)
+        if let validationError = Self.validationError(for: normalized) {
+            return .failure(validationError)
         }
-        if let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-            self.eventTap = nil
+
+        guard normalized != currentShortcut else {
+            return .success
         }
-        lastOptionTapTime = nil
-        wasOptionPressed = false
+
+        let previous = currentShortcut
+        currentShortcut = normalized
+
+        let status = register(shortcut: normalized)
+        guard status == noErr else {
+            currentShortcut = previous
+            _ = register(shortcut: previous)
+            return .failure(Self.registrationErrorMessage(for: status))
+        }
+
+        saveShortcutPreference()
+        return .success
     }
-    
-    private static func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, refcon: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
-        guard let refcon else { return Unmanaged.passUnretained(event) }
-        
-        // Get the manager instance
-        let manager = Unmanaged<HotKeyManager>.fromOpaque(refcon).takeUnretainedValue()
-        
-        // Execute on main actor
-        DispatchQueue.main.async {
-            manager.processFlagsChanged(event)
+
+    func reloadFromDisk() {
+        guard let loaded = Self.loadPersistedShortcut() else {
+            return
         }
-        
-        return Unmanaged.passUnretained(event)
-    }
-    
-    private func processFlagsChanged(_ event: CGEvent) {
-        let flags = event.flags
-        let isOptionPressed = flags.contains(.maskAlternate)
-        
-        // Detect Option key press (transition from not pressed to pressed)
-        if isOptionPressed && !wasOptionPressed {
-            let now = Date()
-            
-            if let lastTap = lastOptionTapTime,
-               now.timeIntervalSince(lastTap) < HotKeyManager.doubleTapInterval {
-                // Double tap detected!
-                NSLog("HotKeyManager: Double Option tap detected!")
-                lastOptionTapTime = nil
-                handler()
-            } else {
-                // First tap
-                lastOptionTapTime = now
-            }
+        let normalized = Self.normalize(loaded)
+        guard normalized != currentShortcut else {
+            return
         }
-        
-        wasOptionPressed = isOptionPressed
+        currentShortcut = normalized
+        _ = register()
     }
-    
-    // MARK: - Modifier + Space
-    
-    private func registerModifierSpace() -> Bool {
+
+    private func register(shortcut: HotKeyShortcut) -> OSStatus {
+        unregister()
+
+        if let validationError = Self.validationError(for: shortcut) {
+            NSLog("HotKeyManager: Invalid shortcut: \(validationError)")
+            return Self.hotKeyInvalidStatus
+        }
+
         var eventType = EventTypeSpec(
             eventClass: OSType(kEventClassKeyboard),
             eventKind: OSType(kEventHotKeyPressed)
@@ -206,33 +144,31 @@ final class HotKeyManager: ObservableObject {
             userData,
             &eventHandlerRef
         )
-        
+
         guard installStatus == noErr else {
-            NSLog("HotKeyManager: Failed to install event handler")
-            return false
+            NSLog("HotKeyManager: Failed to install event handler, status: \(installStatus)")
+            return installStatus
         }
-        
-        let (keyCode, modifiers) = getKeyCodeAndModifiers()
-        
+
         let registerStatus = RegisterEventHotKey(
-            UInt32(keyCode),
-            UInt32(modifiers),
+            shortcut.keyCode,
+            shortcut.carbonModifiers,
             hotKeyID,
             GetApplicationEventTarget(),
             0,
             &hotKeyRef
         )
-        
+
         guard registerStatus == noErr else {
             NSLog("HotKeyManager: Failed to register hotkey, status: \(registerStatus)")
             unregister()
-            return false
+            return registerStatus
         }
-        
-        NSLog("HotKeyManager: Modifier+Space hotkey registered")
-        return true
+
+        NSLog("HotKeyManager: Registered hotkey \(Self.shortcutDescription(shortcut))")
+        return noErr
     }
-    
+
     private func handleHotKeyEvent(eventRef: EventRef) -> OSStatus {
         var pressedID = EventHotKeyID()
         let status = GetEventParameter(
@@ -248,65 +184,276 @@ final class HotKeyManager: ObservableObject {
         guard status == noErr else { return status }
         guard pressedID.signature == hotKeyID.signature,
               pressedID.id == hotKeyID.id else { return noErr }
-        
+
         handler()
         return noErr
     }
-    
+
     private var hotKeyID: EventHotKeyID {
         EventHotKeyID(signature: OSType(0x414C5448), id: 1)
     }
-    
-    private func getKeyCodeAndModifiers() -> (Int, UInt32) {
-        switch currentHotKey {
-        case .commandSpace:
-            return (kVK_Space, UInt32(cmdKey))
-        case .optionSpace:
-            return (kVK_Space, UInt32(optionKey))
-        case .controlSpace:
-            return (kVK_Space, UInt32(controlKey))
-        case .shiftSpace:
-            return (kVK_Space, UInt32(shiftKey))
-        case .doubleOption:
-            return (0, 0)
-        }
-    }
-    
-    func saveHotKeyPreference() {
-        let payload = PersistedHotKeySettings(hotKeyType: currentHotKey.rawValue)
+
+    private func saveShortcutPreference() {
+        let payload = PersistedHotKeySettings(
+            keyCode: currentShortcut.keyCode,
+            carbonModifiers: currentShortcut.carbonModifiers
+        )
         _ = SettingsStore.shared.saveJSON(payload, fileName: Self.settingsFileName)
     }
-    
-    func setHotKey(_ type: HotKeyType) {
-        currentHotKey = type
-    }
 
-    func reloadFromDisk() {
-        guard let loaded = Self.loadPersistedHotKeyType(), loaded != currentHotKey else {
-            return
-        }
-        isApplyingPersistedState = true
-        currentHotKey = loaded
-        isApplyingPersistedState = false
-    }
-
-    private static func loadPersistedHotKeyType() -> HotKeyType? {
+    private static func loadPersistedShortcut() -> HotKeyShortcut? {
         if let payload: PersistedHotKeySettings = SettingsStore.shared.loadJSON(
             PersistedHotKeySettings.self,
             fileName: settingsFileName
-        ), let type = HotKeyType(rawValue: payload.hotKeyType) {
-            return type
+        ) {
+            let shortcut = normalize(
+                HotKeyShortcut(keyCode: payload.keyCode, carbonModifiers: payload.carbonModifiers)
+            )
+            if validationError(for: shortcut) == nil {
+                return shortcut
+            }
         }
+
+        if let payload: LegacyPersistedHotKeySettings = SettingsStore.shared.loadJSON(
+            LegacyPersistedHotKeySettings.self,
+            fileName: settingsFileName
+        ), let migrated = shortcutFromLegacyType(payload.hotKeyType) {
+            let normalized = normalize(migrated)
+            let rewritten = PersistedHotKeySettings(
+                keyCode: normalized.keyCode,
+                carbonModifiers: normalized.carbonModifiers
+            )
+            _ = SettingsStore.shared.saveJSON(rewritten, fileName: settingsFileName)
+            return normalized
+        }
+
         return migrateLegacyUserDefaultsIfNeeded()
     }
 
-    private static func migrateLegacyUserDefaultsIfNeeded() -> HotKeyType? {
+    private static func migrateLegacyUserDefaultsIfNeeded() -> HotKeyShortcut? {
         guard let savedType = UserDefaults.standard.string(forKey: legacyHotKeyTypeKey),
-              let type = HotKeyType(rawValue: savedType) else {
+              let migrated = shortcutFromLegacyType(savedType) else {
             return nil
         }
-        let payload = PersistedHotKeySettings(hotKeyType: type.rawValue)
+
+        let normalized = normalize(migrated)
+        let payload = PersistedHotKeySettings(
+            keyCode: normalized.keyCode,
+            carbonModifiers: normalized.carbonModifiers
+        )
         _ = SettingsStore.shared.saveJSON(payload, fileName: settingsFileName)
-        return type
+        UserDefaults.standard.removeObject(forKey: legacyHotKeyTypeKey)
+        return normalized
     }
+
+    private static func shortcutFromLegacyType(_ rawValue: String) -> HotKeyShortcut? {
+        switch rawValue {
+        case "commandSpace":
+            return HotKeyShortcut(keyCode: UInt32(kVK_Space), carbonModifiers: UInt32(cmdKey))
+        case "optionSpace", "doubleOption":
+            return HotKeyShortcut(keyCode: UInt32(kVK_Space), carbonModifiers: UInt32(optionKey))
+        case "controlSpace":
+            return HotKeyShortcut(keyCode: UInt32(kVK_Space), carbonModifiers: UInt32(controlKey))
+        case "shiftSpace":
+            return HotKeyShortcut(keyCode: UInt32(kVK_Space), carbonModifiers: UInt32(shiftKey))
+        default:
+            return nil
+        }
+    }
+
+    private static func normalize(_ shortcut: HotKeyShortcut) -> HotKeyShortcut {
+        HotKeyShortcut(
+            keyCode: shortcut.keyCode,
+            carbonModifiers: shortcut.carbonModifiers & supportedModifierMask
+        )
+    }
+
+    private static func validationError(for shortcut: HotKeyShortcut) -> String? {
+        guard (shortcut.carbonModifiers & supportedModifierMask) != 0 else {
+            return "Shortcut must include Command, Option, Control, or Shift."
+        }
+        guard !modifierOnlyKeyCodes.contains(shortcut.keyCode) else {
+            return "Shortcut must include a non-modifier key."
+        }
+        return nil
+    }
+
+    private static func registrationErrorMessage(for status: OSStatus) -> String {
+        switch status {
+        case hotKeyExistsStatus:
+            return "Shortcut is already in use by macOS or another app."
+        case hotKeyInvalidStatus:
+            return "Shortcut is not valid for global registration."
+        default:
+            return "Could not register shortcut (code \(status))."
+        }
+    }
+
+    private static func shortcutDescription(_ shortcut: HotKeyShortcut) -> String {
+        let modifiers = modifierDescription(shortcut.carbonModifiers)
+        let keyName = keyDisplayNames[shortcut.keyCode] ?? "Key \(shortcut.keyCode)"
+        if modifiers.isEmpty {
+            return keyName
+        }
+        if keyName.count == 1 || keyName == "␣" {
+            return "\(modifiers)\(keyName)"
+        }
+        return "\(modifiers) \(keyName)"
+    }
+
+    private static func modifierDescription(_ carbonModifiers: UInt32) -> String {
+        var result = ""
+        if (carbonModifiers & UInt32(cmdKey)) != 0 {
+            result += "⌘"
+        }
+        if (carbonModifiers & UInt32(optionKey)) != 0 {
+            result += "⌥"
+        }
+        if (carbonModifiers & UInt32(controlKey)) != 0 {
+            result += "⌃"
+        }
+        if (carbonModifiers & UInt32(shiftKey)) != 0 {
+            result += "⇧"
+        }
+        return result
+    }
+
+    private static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
+        let modifiers = flags.intersection([.command, .option, .control, .shift])
+        var result: UInt32 = 0
+        if modifiers.contains(.command) {
+            result |= UInt32(cmdKey)
+        }
+        if modifiers.contains(.option) {
+            result |= UInt32(optionKey)
+        }
+        if modifiers.contains(.control) {
+            result |= UInt32(controlKey)
+        }
+        if modifiers.contains(.shift) {
+            result |= UInt32(shiftKey)
+        }
+        return result
+    }
+
+    private static let defaultShortcut = HotKeyShortcut(
+        keyCode: UInt32(kVK_Space),
+        carbonModifiers: UInt32(optionKey)
+    )
+
+    private static let modifierOnlyKeyCodes: Set<UInt32> = [
+        UInt32(kVK_Command),
+        UInt32(kVK_Shift),
+        UInt32(kVK_CapsLock),
+        UInt32(kVK_Option),
+        UInt32(kVK_Control),
+        UInt32(kVK_RightShift),
+        UInt32(kVK_RightOption),
+        UInt32(kVK_RightControl),
+        UInt32(kVK_RightCommand),
+        UInt32(kVK_Function)
+    ]
+
+    private static let keyDisplayNames: [UInt32: String] = [
+        UInt32(kVK_ANSI_A): "A",
+        UInt32(kVK_ANSI_B): "B",
+        UInt32(kVK_ANSI_C): "C",
+        UInt32(kVK_ANSI_D): "D",
+        UInt32(kVK_ANSI_E): "E",
+        UInt32(kVK_ANSI_F): "F",
+        UInt32(kVK_ANSI_G): "G",
+        UInt32(kVK_ANSI_H): "H",
+        UInt32(kVK_ANSI_I): "I",
+        UInt32(kVK_ANSI_J): "J",
+        UInt32(kVK_ANSI_K): "K",
+        UInt32(kVK_ANSI_L): "L",
+        UInt32(kVK_ANSI_M): "M",
+        UInt32(kVK_ANSI_N): "N",
+        UInt32(kVK_ANSI_O): "O",
+        UInt32(kVK_ANSI_P): "P",
+        UInt32(kVK_ANSI_Q): "Q",
+        UInt32(kVK_ANSI_R): "R",
+        UInt32(kVK_ANSI_S): "S",
+        UInt32(kVK_ANSI_T): "T",
+        UInt32(kVK_ANSI_U): "U",
+        UInt32(kVK_ANSI_V): "V",
+        UInt32(kVK_ANSI_W): "W",
+        UInt32(kVK_ANSI_X): "X",
+        UInt32(kVK_ANSI_Y): "Y",
+        UInt32(kVK_ANSI_Z): "Z",
+        UInt32(kVK_ANSI_0): "0",
+        UInt32(kVK_ANSI_1): "1",
+        UInt32(kVK_ANSI_2): "2",
+        UInt32(kVK_ANSI_3): "3",
+        UInt32(kVK_ANSI_4): "4",
+        UInt32(kVK_ANSI_5): "5",
+        UInt32(kVK_ANSI_6): "6",
+        UInt32(kVK_ANSI_7): "7",
+        UInt32(kVK_ANSI_8): "8",
+        UInt32(kVK_ANSI_9): "9",
+        UInt32(kVK_ANSI_Equal): "=",
+        UInt32(kVK_ANSI_Minus): "-",
+        UInt32(kVK_ANSI_RightBracket): "]",
+        UInt32(kVK_ANSI_LeftBracket): "[",
+        UInt32(kVK_ANSI_Quote): "'",
+        UInt32(kVK_ANSI_Semicolon): ";",
+        UInt32(kVK_ANSI_Backslash): "\\",
+        UInt32(kVK_ANSI_Comma): ",",
+        UInt32(kVK_ANSI_Slash): "/",
+        UInt32(kVK_ANSI_Period): ".",
+        UInt32(kVK_ANSI_Grave): "`",
+        UInt32(kVK_Space): "␣",
+        UInt32(kVK_Return): "↩",
+        UInt32(kVK_Tab): "⇥",
+        UInt32(kVK_Delete): "⌫",
+        UInt32(kVK_Escape): "⎋",
+        UInt32(kVK_ForwardDelete): "⌦",
+        UInt32(kVK_Help): "Help",
+        UInt32(kVK_Home): "Home",
+        UInt32(kVK_End): "End",
+        UInt32(kVK_PageUp): "Page Up",
+        UInt32(kVK_PageDown): "Page Down",
+        UInt32(kVK_LeftArrow): "←",
+        UInt32(kVK_RightArrow): "→",
+        UInt32(kVK_UpArrow): "↑",
+        UInt32(kVK_DownArrow): "↓",
+        UInt32(kVK_F1): "F1",
+        UInt32(kVK_F2): "F2",
+        UInt32(kVK_F3): "F3",
+        UInt32(kVK_F4): "F4",
+        UInt32(kVK_F5): "F5",
+        UInt32(kVK_F6): "F6",
+        UInt32(kVK_F7): "F7",
+        UInt32(kVK_F8): "F8",
+        UInt32(kVK_F9): "F9",
+        UInt32(kVK_F10): "F10",
+        UInt32(kVK_F11): "F11",
+        UInt32(kVK_F12): "F12",
+        UInt32(kVK_F13): "F13",
+        UInt32(kVK_F14): "F14",
+        UInt32(kVK_F15): "F15",
+        UInt32(kVK_F16): "F16",
+        UInt32(kVK_F17): "F17",
+        UInt32(kVK_F18): "F18",
+        UInt32(kVK_F19): "F19",
+        UInt32(kVK_F20): "F20",
+        UInt32(kVK_ANSI_Keypad0): "Num 0",
+        UInt32(kVK_ANSI_Keypad1): "Num 1",
+        UInt32(kVK_ANSI_Keypad2): "Num 2",
+        UInt32(kVK_ANSI_Keypad3): "Num 3",
+        UInt32(kVK_ANSI_Keypad4): "Num 4",
+        UInt32(kVK_ANSI_Keypad5): "Num 5",
+        UInt32(kVK_ANSI_Keypad6): "Num 6",
+        UInt32(kVK_ANSI_Keypad7): "Num 7",
+        UInt32(kVK_ANSI_Keypad8): "Num 8",
+        UInt32(kVK_ANSI_Keypad9): "Num 9",
+        UInt32(kVK_ANSI_KeypadDecimal): "Num .",
+        UInt32(kVK_ANSI_KeypadMultiply): "Num *",
+        UInt32(kVK_ANSI_KeypadPlus): "Num +",
+        UInt32(kVK_ANSI_KeypadClear): "Num Clear",
+        UInt32(kVK_ANSI_KeypadDivide): "Num /",
+        UInt32(kVK_ANSI_KeypadEnter): "Num ↩",
+        UInt32(kVK_ANSI_KeypadMinus): "Num -",
+        UInt32(kVK_ANSI_KeypadEquals): "Num ="
+    ]
 }
