@@ -51,10 +51,29 @@ private func editorFont(for fontSize: CGFloat) -> NSFont {
     NSFont.systemFont(ofSize: fontSize)
 }
 
+private func editorSpaceAdvance(for font: NSFont) -> CGFloat {
+    let measured = (" " as NSString).size(withAttributes: [.font: font]).width
+    return max(1, measured)
+}
+
+private func editorTabInterval(for font: NSFont) -> CGFloat {
+    editorSpaceAdvance(for: font) * 4
+}
+
+private func editorParagraphStyle(font: NSFont, headIndent: CGFloat = 0) -> NSParagraphStyle {
+    let style = NSMutableParagraphStyle()
+    style.defaultTabInterval = editorTabInterval(for: font)
+    style.firstLineHeadIndent = 0
+    style.headIndent = max(0, headIndent)
+    return style
+}
+
 private func editorBaseAttributes(fontSize: CGFloat) -> [NSAttributedString.Key: Any] {
-    [
-        .font: editorFont(for: fontSize),
+    let font = editorFont(for: fontSize)
+    return [
+        .font: font,
         .foregroundColor: editorTextColor,
+        .paragraphStyle: editorParagraphStyle(font: font),
     ]
 }
 
@@ -2045,11 +2064,71 @@ private func applySearchHighlightsTemporarily(in textView: NSTextView, query: St
 
 private func applyEditorTypingAppearance(to textView: NSTextView, fontSize: CGFloat) {
     textView.insertionPointColor = editorTextColor
+    let font = editorFont(for: fontSize)
     var attributes = textView.typingAttributes
-    attributes[.font] = editorFont(for: fontSize)
+    attributes[.font] = font
     attributes[.foregroundColor] = editorTextColor
+    let paragraphStyle = ((attributes[.paragraphStyle] as? NSParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+    paragraphStyle.defaultTabInterval = editorTabInterval(for: font)
+    paragraphStyle.firstLineHeadIndent = 0
+    attributes[.paragraphStyle] = paragraphStyle
     attributes.removeValue(forKey: .backgroundColor)
     textView.typingAttributes = attributes
+}
+
+private func leadingIndentWidth(for paragraph: String, tabInterval: CGFloat, spaceAdvance: CGFloat) -> CGFloat {
+    var width: CGFloat = 0
+    for scalar in paragraph.unicodeScalars {
+        switch scalar.value {
+        case 9: // tab
+            width = (floor(width / tabInterval) + 1) * tabInterval
+        case 32: // space
+            width += spaceAdvance
+        default:
+            return width
+        }
+    }
+    return width
+}
+
+private func normalizeParagraphIndentation(in storage: NSTextStorage, fontSize: CGFloat) {
+    guard storage.length > 0 else {
+        return
+    }
+
+    let baseFont = editorFont(for: fontSize)
+    let tabInterval = editorTabInterval(for: baseFont)
+    let spaceAdvance = editorSpaceAdvance(for: baseFont)
+    let nsText = storage.string as NSString
+
+    var paragraphLocation = 0
+    while paragraphLocation < nsText.length {
+        let paragraphRange = nsText.paragraphRange(for: NSRange(location: paragraphLocation, length: 0))
+        let paragraphText = nsText.substring(with: paragraphRange)
+        let indent = leadingIndentWidth(
+            for: paragraphText,
+            tabInterval: tabInterval,
+            spaceAdvance: spaceAdvance
+        )
+
+        let currentStyle = storage.attribute(.paragraphStyle, at: paragraphRange.location, effectiveRange: nil) as? NSParagraphStyle
+        let currentHeadIndent = currentStyle?.headIndent ?? 0
+        let currentTabInterval = currentStyle?.defaultTabInterval ?? 0
+        let currentFirstLineIndent = currentStyle?.firstLineHeadIndent ?? 0
+        let needsUpdate = abs(currentHeadIndent - indent) > 0.5
+            || abs(currentTabInterval - tabInterval) > 0.5
+            || abs(currentFirstLineIndent) > 0.5
+
+        if needsUpdate {
+            let updatedStyle = (currentStyle?.mutableCopy() as? NSMutableParagraphStyle) ?? NSMutableParagraphStyle()
+            updatedStyle.defaultTabInterval = tabInterval
+            updatedStyle.firstLineHeadIndent = 0
+            updatedStyle.headIndent = indent
+            storage.addAttribute(.paragraphStyle, value: updatedStyle, range: paragraphRange)
+        }
+
+        paragraphLocation = paragraphRange.upperBound
+    }
 }
 
 private func normalizeVisibleTextAttributes(in textView: NSTextView, fontSize: CGFloat) {
@@ -2062,6 +2141,7 @@ private func normalizeVisibleTextAttributes(in textView: NSTextView, fontSize: C
         return
     }
 
+    let defaultFont = editorFont(for: fontSize)
     storage.beginEditing()
     storage.enumerateAttributes(in: fullRange, options: []) { attrs, range, _ in
         if attrs[.attachment] != nil {
@@ -2072,12 +2152,13 @@ private func normalizeVisibleTextAttributes(in textView: NSTextView, fontSize: C
             updates[.foregroundColor] = editorTextColor
         }
         if attrs[.font] == nil {
-            updates[.font] = editorFont(for: fontSize)
+            updates[.font] = defaultFont
         }
         if !updates.isEmpty {
             storage.addAttributes(updates, range: range)
         }
     }
+    normalizeParagraphIndentation(in: storage, fontSize: fontSize)
     storage.endEditing()
 }
 
