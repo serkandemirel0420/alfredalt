@@ -1,6 +1,6 @@
 [package]
 name = "alfred_alt"
-version = "1.4.6"
+version = "1.4.7"
 edition = "2024"
 default-run = "alfred_alt"
 
